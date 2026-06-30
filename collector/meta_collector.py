@@ -1,5 +1,6 @@
 """
-Meta Ads data collector — fetches campaigns, ad sets, and insights from the Meta Marketing API.
+Meta Ads data collector — fetches all ad accounts from Business Managers,
+then pulls campaign insights from the Meta Marketing API.
 """
 import os
 import json
@@ -7,6 +8,7 @@ import logging
 from datetime import datetime, timedelta, date
 
 from facebook_business.api import FacebookAdsApi
+from facebook_business.adobjects.business import Business
 from facebook_business.adobjects.adaccount import AdAccount
 from facebook_business.adobjects.campaign import Campaign
 
@@ -28,13 +30,52 @@ CAMPAIGN_FIELDS = [
     "daily_budget", "lifetime_budget", "created_time",
 ]
 
+ACCOUNT_FIELDS = ["id", "name", "account_status", "currency", "timezone_name"]
+
 
 def _init_api():
     FacebookAdsApi.init(
-        app_id=os.environ.get("META_APP_ID"),
-        app_secret=os.environ.get("META_APP_SECRET"),
+        app_id=os.environ.get("META_APP_ID") or None,
+        app_secret=os.environ.get("META_APP_SECRET") or None,
         access_token=os.environ["META_ACCESS_TOKEN"],
     )
+
+
+def get_ad_accounts_from_bm(bm_id: str) -> list[dict]:
+    """Return all active ad accounts under a Business Manager."""
+    try:
+        business = Business(bm_id)
+        accounts = business.get_owned_ad_accounts(fields=ACCOUNT_FIELDS)
+        result = [dict(a) for a in accounts]
+        logger.info(f"BM {bm_id}: found {len(result)} ad accounts")
+        return result
+    except Exception as e:
+        logger.error(f"BM {bm_id}: failed to fetch accounts — {e}")
+        return []
+
+
+def get_all_ad_accounts() -> list[dict]:
+    """
+    Collect ad accounts from all configured BM IDs.
+    Returns list of dicts with keys: id, name, bm_id, bm_label
+    """
+    bm_configs = [
+        (os.environ.get("META_BM_ID_MAIN", ""), "main"),
+        (os.environ.get("META_BM_ID_ZEEKR", ""), "zeekr"),
+    ]
+    all_accounts = []
+    seen = set()
+    for bm_id, label in bm_configs:
+        if not bm_id:
+            continue
+        for acc in get_ad_accounts_from_bm(bm_id):
+            acc_id = acc.get("id", "")
+            if acc_id and acc_id not in seen:
+                acc["bm_id"] = bm_id
+                acc["bm_label"] = label
+                all_accounts.append(acc)
+                seen.add(acc_id)
+    return all_accounts
 
 
 def _extract_action(actions: list, action_type: str) -> int:
@@ -69,14 +110,26 @@ def _parse_insight_row(row: dict) -> dict:
     action_values = row.get("action_values", [])
     cost_per = row.get("cost_per_action_type", [])
 
-    leads = _extract_action(actions, "lead") or _extract_action(actions, "onsite_conversion.lead_grouped")
+    leads = (
+        _extract_action(actions, "lead")
+        or _extract_action(actions, "onsite_conversion.lead_grouped")
+    )
     link_clicks = _extract_action(actions, "link_click")
     page_likes = _extract_action(actions, "like")
     post_engagements = int(float(row.get("post_engagement", 0) or 0))
     video_views = _extract_action(actions, "video_view")
-    purchases = _extract_action(actions, "purchase") or _extract_action(actions, "omni_purchase")
-    purchase_value = _extract_action_value(action_values, "purchase") or _extract_action_value(action_values, "omni_purchase")
-    cost_per_lead = _extract_cost_per(cost_per, "lead") or _extract_cost_per(cost_per, "onsite_conversion.lead_grouped")
+    purchases = (
+        _extract_action(actions, "purchase")
+        or _extract_action(actions, "omni_purchase")
+    )
+    purchase_value = (
+        _extract_action_value(action_values, "purchase")
+        or _extract_action_value(action_values, "omni_purchase")
+    )
+    cost_per_lead = (
+        _extract_cost_per(cost_per, "lead")
+        or _extract_cost_per(cost_per, "onsite_conversion.lead_grouped")
+    )
     cost_per_link_click = _extract_cost_per(cost_per, "link_click")
 
     spend = float(row.get("spend", 0) or 0)
@@ -111,20 +164,21 @@ def _parse_insight_row(row: dict) -> dict:
     }
 
 
-def fetch_campaigns() -> list[dict]:
-    account = AdAccount(f"act_{os.environ['META_AD_ACCOUNT_ID'].lstrip('act_')}")
+def fetch_campaigns_for_account(account_id: str) -> list[dict]:
+    account_id = account_id.lstrip("act_")
+    account = AdAccount(f"act_{account_id}")
     campaigns = account.get_campaigns(fields=CAMPAIGN_FIELDS)
     result = []
     for c in campaigns:
         data = dict(c)
         upsert_campaign(data)
         result.append(data)
-    logger.info(f"Fetched {len(result)} campaigns")
     return result
 
 
-def fetch_insights_for_period(date_from: date, date_to: date) -> int:
-    account = AdAccount(f"act_{os.environ['META_AD_ACCOUNT_ID'].lstrip('act_')}")
+def fetch_insights_for_account(account_id: str, date_from: date, date_to: date) -> int:
+    account_id = account_id.lstrip("act_")
+    account = AdAccount(f"act_{account_id}")
 
     params = {
         "level": "adset",
@@ -143,31 +197,69 @@ def fetch_insights_for_period(date_from: date, date_to: date) -> int:
         parsed = _parse_insight_row(dict(row))
         upsert_daily_metrics(parsed)
         count += 1
-
-    logger.info(f"Saved {count} insight rows for {date_from} → {date_to}")
     return count
 
 
-def run_daily_collection():
-    """Main entry point called by scheduler — fetches yesterday's data."""
+def run_daily_collection() -> int:
+    """Fetch yesterday's data for all ad accounts in all BMs."""
     _init_api()
     init_db()
 
     yesterday = date.today() - timedelta(days=1)
-    fetch_campaigns()
-    count = fetch_insights_for_period(yesterday, yesterday)
-    logger.info(f"Daily collection complete: {count} rows saved for {yesterday}")
-    return count
+    accounts = get_all_ad_accounts()
+
+    if not accounts:
+        logger.warning("No ad accounts found — check BM IDs and token permissions")
+        return 0
+
+    total = 0
+    for acc in accounts:
+        acc_id = acc["id"]
+        acc_name = acc.get("name", acc_id)
+        logger.info(f"Processing account: {acc_name} ({acc_id}) [{acc['bm_label']}]")
+        try:
+            fetch_campaigns_for_account(acc_id)
+            count = fetch_insights_for_account(acc_id, yesterday, yesterday)
+            total += count
+            logger.info(f"  → {count} rows saved")
+        except Exception as e:
+            logger.error(f"  → Failed: {e}")
+
+    logger.info(f"Daily collection done: {total} total rows for {yesterday}")
+    return total
 
 
-def run_historical_backfill(days: int = 30):
-    """One-time backfill for the last N days."""
+def run_historical_backfill(days: int = 30) -> int:
+    """One-time backfill for the last N days across all accounts."""
     _init_api()
     init_db()
 
     date_to = date.today() - timedelta(days=1)
     date_from = date_to - timedelta(days=days - 1)
-    fetch_campaigns()
-    count = fetch_insights_for_period(date_from, date_to)
-    logger.info(f"Backfill complete: {count} rows for last {days} days")
-    return count
+    accounts = get_all_ad_accounts()
+
+    if not accounts:
+        logger.warning("No ad accounts found")
+        return 0
+
+    total = 0
+    for acc in accounts:
+        acc_id = acc["id"]
+        acc_name = acc.get("name", acc_id)
+        logger.info(f"Backfilling: {acc_name} ({acc_id})")
+        try:
+            fetch_campaigns_for_account(acc_id)
+            count = fetch_insights_for_account(acc_id, date_from, date_to)
+            total += count
+            logger.info(f"  → {count} rows")
+        except Exception as e:
+            logger.error(f"  → Failed: {e}")
+
+    logger.info(f"Backfill done: {total} rows for last {days} days")
+    return total
+
+
+def list_accounts() -> list[dict]:
+    """CLI helper — print all found ad accounts."""
+    _init_api()
+    return get_all_ad_accounts()
