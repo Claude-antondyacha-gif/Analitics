@@ -40,6 +40,9 @@ jobs:
           META_BM_ID_MAIN: ${{ secrets.META_BM_ID_MAIN }}
           META_BM_ID_ZEEKR: ${{ secrets.META_BM_ID_ZEEKR }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOOGLE_SHEET_ID_SFERO: ${{ secrets.GOOGLE_SHEET_ID_SFERO }}
         run: python3 scheduler.py --now
 
       - name: Upload database as artifact

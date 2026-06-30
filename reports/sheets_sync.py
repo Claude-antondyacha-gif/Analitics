@@ -1,5 +1,6 @@
 """
-Google Sheets sync — writes daily metrics and AI recommendations to a Google Sheet.
+Google Sheets sync — writes daily metrics and AI recommendations to Google Sheets.
+Supports multiple spreadsheets via GOOGLE_SHEET_ID_SFERO, GOOGLE_SHEET_ID_ZEEKR, etc.
 """
 import os
 import logging
@@ -20,14 +21,13 @@ SCOPES = [
 METRICS_HEADERS = [
     "Дата", "Кампанія", "Група оголошень", "Витрати ($)", "Охоплення",
     "Покази", "Кліки", "CTR (%)", "CPC ($)", "CPM ($)",
-    "Ліди", "Вартість ліда ($)", "Покупки", "Вартість покупки ($)",
-    "ROAS", "Переходи за посиланням", "Вподобання сторінки",
-    "Перегляди відео", "Частота",
+    "Ліди", "Вартість ліда ($)", "Покупки", "ROAS",
+    "Переходи за посиланням", "Вподобання сторінки", "Перегляди відео", "Частота",
 ]
 
 SUMMARY_HEADERS = [
-    "Період", "Витрати", "Ліди", "CPL", "Покупки", "CPP", "ROAS",
-    "CTR", "CPC", "Кліки", "Охоплення",
+    "Період", "Витрати ($)", "Ліди", "CPL ($)", "Покупки", "ROAS",
+    "CTR (%)", "CPC ($)", "Кліки", "Охоплення", "Покази",
 ]
 
 
@@ -37,7 +37,7 @@ def _get_client():
     return gspread.authorize(creds)
 
 
-def _ensure_worksheet(spreadsheet, title: str, rows: int = 1000, cols: int = 25):
+def _ensure_worksheet(spreadsheet, title: str, rows: int = 2000, cols: int = 25):
     try:
         return spreadsheet.worksheet(title)
     except gspread.WorksheetNotFound:
@@ -59,7 +59,6 @@ def _format_row(r: dict) -> list:
         r.get("leads", 0),
         round(r.get("cost_per_lead", 0), 2),
         r.get("purchases", 0),
-        round(r.get("cost_per_lead", 0), 2),  # reuse field if no cost_per_purchase stored
         round(r.get("purchase_roas", 0), 2),
         r.get("link_clicks", 0),
         r.get("page_likes", 0),
@@ -68,61 +67,102 @@ def _format_row(r: dict) -> list:
     ]
 
 
-def sync_to_sheets(days: int = 30):
-    sheet_id = os.environ.get("GOOGLE_SHEET_ID")
-    if not sheet_id:
-        logger.warning("GOOGLE_SHEET_ID not set, skipping Sheets sync")
+def _sync_one_sheet(gc, sheet_id: str, label: str, days: int = 30, campaign_id: str = None):
+    """Sync data to a single spreadsheet."""
+    try:
+        spreadsheet = gc.open_by_key(sheet_id)
+    except Exception as e:
+        logger.error(f"Cannot open sheet {label} ({sheet_id}): {e}")
         return
 
-    gc = _get_client()
-    spreadsheet = gc.open_by_key(sheet_id)
+    rows = get_metrics_by_period(days=days, campaign_id=campaign_id)
 
-    # --- Raw metrics tab ---
+    # ── Детальні дані ──
     ws_raw = _ensure_worksheet(spreadsheet, "Детальні дані")
-    rows = get_metrics_by_period(days=days)
     data = [METRICS_HEADERS] + [_format_row(r) for r in rows]
     ws_raw.clear()
     ws_raw.update("A1", data)
-    ws_raw.format("A1:S1", {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.2, "green": 0.4, "blue": 0.8}})
+    try:
+        ws_raw.format("A1:R1", {
+            "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+            "backgroundColor": {"red": 0.18, "green": 0.27, "blue": 0.6},
+        })
+    except Exception:
+        pass
 
-    # --- Summary tab ---
+    # ── Підсумок по периодах ──
     ws_summary = _ensure_worksheet(spreadsheet, "Підсумок")
-    periods = [(1, "Вчора"), (3, "3 дні"), (7, "7 днів"), (14, "2 тижні"), (30, "Місяць")]
+    period_defs = [(1, "Вчора"), (3, "3 дні"), (7, "7 днів"), (14, "2 тижні"), (30, "Місяць")]
     summary_rows = [SUMMARY_HEADERS]
-    for d, label in periods:
-        agg = get_aggregated_metrics(days=d)
+    for d, period_label in period_defs:
+        agg = get_aggregated_metrics(days=d, campaign_id=campaign_id)
         summary_rows.append([
-            label,
-            f"${agg.get('total_spend', 0):.2f}",
-            agg.get("total_leads", 0),
-            f"${agg.get('cost_per_lead', 0):.2f}",
-            agg.get("total_purchases", 0),
-            f"${agg.get('cost_per_purchase', 0):.2f}",
-            agg.get("roas", 0),
-            f"{agg.get('avg_ctr', 0):.2f}%",
-            f"${agg.get('avg_cpc', 0):.2f}",
-            agg.get("total_clicks", 0),
-            agg.get("total_reach", 0),
+            period_label,
+            round(agg.get("total_spend") or 0, 2),
+            agg.get("total_leads") or 0,
+            round(agg.get("cost_per_lead") or 0, 2),
+            agg.get("total_purchases") or 0,
+            round(agg.get("roas") or 0, 2),
+            round(agg.get("avg_ctr") or 0, 2),
+            round(agg.get("avg_cpc") or 0, 2),
+            agg.get("total_clicks") or 0,
+            agg.get("total_reach") or 0,
+            agg.get("total_impressions") or 0,
         ])
     ws_summary.clear()
     ws_summary.update("A1", summary_rows)
-    ws_summary.format("A1:K1", {"textFormat": {"bold": True}})
+    try:
+        ws_summary.format("A1:K1", {"textFormat": {"bold": True}})
+    except Exception:
+        pass
 
-    # --- AI Recommendations tab ---
+    # ── AI Рекомендації ──
     ws_ai = _ensure_worksheet(spreadsheet, "AI Рекомендації")
     recs = get_latest_recommendations(limit=20)
-    ai_rows = [["Дата", "Період", "Тип", "Огляд", "Рекомендації", "Критичні сповіщення"]]
+    ai_rows = [["Дата", "Період", "Огляд", "Рекомендації", "Критичні сповіщення"]]
     for rec in recs:
         ai_rows.append([
-            rec["created_at"][:16],
+            rec["created_at"][:16].replace("T", " "),
             rec["period"],
-            rec["analysis_type"],
             rec["summary"],
-            " | ".join(r.get("text", "") for r in rec["recommendations"]),
-            " | ".join(a.get("message", "") for a in rec["critical_alerts"]),
+            " | ".join(r.get("text", "") for r in rec.get("recommendations", [])),
+            " | ".join(a.get("message", "") for a in rec.get("critical_alerts", [])),
         ])
     ws_ai.clear()
     ws_ai.update("A1", ai_rows)
-    ws_ai.format("A1:F1", {"textFormat": {"bold": True}})
+    try:
+        ws_ai.format("A1:E1", {"textFormat": {"bold": True}})
+    except Exception:
+        pass
 
-    logger.info(f"Google Sheets synced: {len(rows)} metric rows, {len(recs)} recommendations")
+    logger.info(f"Sheet '{label}' synced: {len(rows)} rows, {len(recs)} recommendations")
+
+
+def sync_to_sheets(days: int = 30):
+    """Sync all configured spreadsheets."""
+    creds_file = os.environ.get("GOOGLE_SHEETS_CREDENTIALS_FILE", "credentials.json")
+    if not os.path.exists(creds_file):
+        logger.warning(f"Google credentials file not found: {creds_file}. Skipping Sheets sync.")
+        return
+
+    gc = _get_client()
+
+    # Find all configured sheet IDs
+    sheets_config = []
+    for key, val in os.environ.items():
+        if key.startswith("GOOGLE_SHEET_ID_") and val:
+            label = key.replace("GOOGLE_SHEET_ID_", "").capitalize()
+            sheets_config.append((label, val))
+
+    # Also check legacy GOOGLE_SHEET_ID
+    legacy_id = os.environ.get("GOOGLE_SHEET_ID", "")
+    if legacy_id and not any(v == legacy_id for _, v in sheets_config):
+        sheets_config.append(("Main", legacy_id))
+
+    if not sheets_config:
+        logger.warning("No GOOGLE_SHEET_ID_* environment variables set. Skipping.")
+        return
+
+    for label, sheet_id in sheets_config:
+        logger.info(f"Syncing sheet: {label} ({sheet_id[:20]}...)")
+        _sync_one_sheet(gc, sheet_id, label, days=days)

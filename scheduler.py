@@ -59,6 +59,14 @@ def daily_job():
     except Exception as e:
         logger.warning(f"Sheets sync failed (non-critical): {e}")
 
+    # 4. Send Telegram report
+    try:
+        from notifier.telegram_bot import send_daily_report
+        ok = send_daily_report()
+        logger.info(f"Telegram report sent: {ok}")
+    except Exception as e:
+        logger.warning(f"Telegram send failed (non-critical): {e}")
+
     logger.info("=== DAILY JOB DONE ===")
 
 
