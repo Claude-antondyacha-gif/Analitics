@@ -1,0 +1,58 @@
+name: Daily Meta Ads Collection
+
+on:
+  schedule:
+    - cron: '0 5 * * *'  # 07:00 Kyiv (UTC+2)
+  workflow_dispatch:       # дозволяє запустити вручну з GitHub
+
+jobs:
+  collect-and-analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create data directory
+        run: mkdir -p data
+
+      - name: Restore database cache
+        uses: actions/cache@v4
+        with:
+          path: data/analytics.db
+          key: analytics-db-${{ github.run_number }}
+          restore-keys: |
+            analytics-db-
+
+      - name: Run daily collection + AI analysis
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_BM_ID_MAIN: ${{ secrets.META_BM_ID_MAIN }}
+          META_BM_ID_ZEEKR: ${{ secrets.META_BM_ID_ZEEKR }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python3 scheduler.py --now
+
+      - name: Upload database as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: analytics-db-${{ github.run_id }}
+          path: data/analytics.db
+          retention-days: 90
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs-${{ github.run_id }}
+          path: data/scheduler.log
+          retention-days: 30
