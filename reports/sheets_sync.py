@@ -206,8 +206,15 @@ def _fill_traffic_report_sheet(spreadsheet, sheet_name: str,
             break
 
     if target_row is None:
-        logger.warning(f"Date {today_iso} not found in '{sheet_name}' — cannot fill row")
-        return
+        # Date not pre-filled — append a new row at the end
+        logger.info(f"Date {today_iso} not found in '{sheet_name}' — appending new row")
+        # Find last non-empty row
+        last_row = len(all_values)
+        while last_row > 0 and not any(c.strip() for c in all_values[last_row - 1]):
+            last_row -= 1
+        target_row = last_row + 1
+        # Write the date cell first
+        ws.update(f"A{target_row}", [[today_ddmmYYYY]])
 
     # Aggregate traffic metrics
     total_spend = sum(s["spend"] for s in traffic_stats.values())
