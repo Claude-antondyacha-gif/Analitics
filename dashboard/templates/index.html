@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Meta Ads Analytics</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #232738;
+      --border: #2e3347;
+      --accent: #4f6ef7;
+      --accent2: #7c3aed;
+      --green: #22c55e;
+      --red: #ef4444;
+      --yellow: #f59e0b;
+      --text: #e2e8f0;
+      --muted: #8892a4;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; font-size: 14px; min-height: 100vh; }
+
+    /* Layout */
+    .app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+    .sidebar { background: var(--surface); border-right: 1px solid var(--border); padding: 24px 16px; display: flex; flex-direction: column; gap: 4px; }
+    .logo { font-size: 16px; font-weight: 700; color: var(--accent); margin-bottom: 24px; display: flex; align-items: center; gap: 8px; }
+    .logo span { font-size: 22px; }
+    .nav-item { padding: 10px 12px; border-radius: 8px; cursor: pointer; color: var(--muted); transition: all .15s; display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .nav-item:hover, .nav-item.active { background: var(--surface2); color: var(--text); }
+    .nav-item.active { color: var(--accent); }
+    .main { padding: 28px 32px; overflow-y: auto; }
+    .page { display: none; }
+    .page.active { display: block; }
+
+    /* Period selector */
+    .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
+    .toolbar h1 { font-size: 20px; font-weight: 700; flex: 1; }
+    .period-btns { display: flex; gap: 4px; background: var(--surface); border-radius: 8px; padding: 4px; }
+    .period-btn { padding: 6px 14px; border-radius: 6px; border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; font-weight: 500; transition: all .15s; }
+    .period-btn.active { background: var(--accent); color: #fff; }
+    .btn { padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; transition: all .15s; display: inline-flex; align-items: center; gap: 6px; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { opacity: .85; }
+    .btn-sm { padding: 5px 10px; font-size: 12px; }
+    .btn-danger { background: var(--red); color: #fff; }
+    .btn-success { background: var(--green); color: #fff; }
+    .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+
+    /* KPI Cards */
+    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 14px; margin-bottom: 24px; }
+    .kpi-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }
+    .kpi-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px; }
+    .kpi-value { font-size: 26px; font-weight: 700; line-height: 1; }
+    .kpi-sub { font-size: 11px; color: var(--muted); margin-top: 6px; }
+    .kpi-card.accent { border-color: var(--accent); }
+    .kpi-card.green { border-color: var(--green); }
+    .kpi-card.red { border-color: var(--red); }
+
+    /* Charts */
+    .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+    .chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+    .chart-card h3 { font-size: 13px; color: var(--muted); margin-bottom: 16px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
+    .chart-card.wide { grid-column: span 2; }
+    canvas { max-height: 220px; }
+
+    /* Table */
+    .table-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 20px; overflow: hidden; }
+    .table-card h3 { padding: 16px 20px; font-size: 14px; font-weight: 600; border-bottom: 1px solid var(--border); }
+    table { width: 100%; border-collapse: collapse; }
+    th { padding: 10px 14px; text-align: left; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; border-bottom: 1px solid var(--border); background: var(--surface2); }
+    td { padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: var(--surface2); }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+    .badge-active { background: rgba(34,197,94,.15); color: var(--green); }
+    .badge-paused { background: rgba(245,158,11,.15); color: var(--yellow); }
+    .badge-archived { background: rgba(239,68,68,.15); color: var(--red); }
+    .badge-high { background: rgba(239,68,68,.15); color: var(--red); }
+    .badge-medium { background: rgba(245,158,11,.15); color: var(--yellow); }
+    .badge-low { background: rgba(34,197,94,.15); color: var(--green); }
+    .badge-critical { background: rgba(239,68,68,.2); color: var(--red); border: 1px solid var(--red); }
+    .badge-warning { background: rgba(245,158,11,.2); color: var(--yellow); border: 1px solid var(--yellow); }
+
+    /* Alert banner */
+    .alert-banner { background: rgba(239,68,68,.1); border: 1px solid rgba(239,68,68,.3); border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: flex-start; gap: 10px; }
+    .alert-banner .icon { font-size: 18px; flex-shrink: 0; }
+
+    /* AI Chat */
+    .chat-container { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); height: 500px; display: flex; flex-direction: column; }
+    .chat-messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    .chat-msg { max-width: 85%; padding: 10px 14px; border-radius: 10px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+    .chat-msg.user { background: var(--accent); color: #fff; align-self: flex-end; }
+    .chat-msg.ai { background: var(--surface2); color: var(--text); align-self: flex-start; border: 1px solid var(--border); }
+    .chat-input-row { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); }
+    .chat-input-row input { flex: 1; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; color: var(--text); font-size: 13px; outline: none; }
+    .chat-input-row input:focus { border-color: var(--accent); }
+
+    /* Recommendations */
+    .rec-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 10px; }
+    .rec-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .rec-meta { font-size: 11px; color: var(--muted); }
+    .rec-text { font-size: 13px; line-height: 1.6; color: var(--text); }
+
+    /* Spinner */
+    .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Utility */
+    .text-green { color: var(--green); }
+    .text-red { color: var(--red); }
+    .text-yellow { color: var(--yellow); }
+    .text-muted { color: var(--muted); }
+    .flex { display: flex; align-items: center; gap: 8px; }
+    .loading { text-align: center; padding: 40px; color: var(--muted); }
+    .section-title { font-size: 15px; font-weight: 600; margin-bottom: 14px; }
+    .divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+    @media (max-width: 900px) { .app { grid-template-columns: 1fr; } .sidebar { display: none; } .charts-grid { grid-template-columns: 1fr; } .chart-card.wide { grid-column: span 1; } }
+  </style>
+</head>
+<body>
+<div class="app">
+  <!-- Sidebar -->
+  <nav class="sidebar">
+    <div class="logo"><span>📊</span> Meta Analytics</div>
+    <div class="nav-item active" onclick="showPage('dashboard', this)">🏠 Дашборд</div>
+    <div class="nav-item" onclick="showPage('campaigns', this)">📢 Кампанії</div>
+    <div class="nav-item" onclick="showPage('ai', this)">🤖 AI Аналіз</div>
+    <div class="nav-item" onclick="showPage('chat', this)">💬 AI Чат</div>
+    <div style="margin-top:auto; padding-top: 16px; border-top: 1px solid var(--border);">
+      <button class="btn btn-primary" style="width:100%" onclick="collectData()">
+        🔄 Оновити дані
+      </button>
+      <div id="last-update" class="text-muted" style="font-size:11px; margin-top:8px; text-align:center;"></div>
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <main class="main">
+
+    <!-- ── DASHBOARD ── -->
+    <div class="page active" id="page-dashboard">
+      <div class="toolbar">
+        <h1>📊 Огляд рекламного кабінету</h1>
+        <div class="period-btns">
+          <button class="period-btn active" onclick="setPeriod(1, this)">Вчора</button>
+          <button class="period-btn" onclick="setPeriod(3, this)">3 дні</button>
+          <button class="period-btn" onclick="setPeriod(7, this)">7 днів</button>
+          <button class="period-btn" onclick="setPeriod(14, this)">14 днів</button>
+          <button class="period-btn" onclick="setPeriod(30, this)">Місяць</button>
+        </div>
+      </div>
+
+      <!-- Critical alerts -->
+      <div id="critical-alerts"></div>
+
+      <!-- KPI Cards -->
+      <div class="kpi-grid" id="kpi-cards">
+        <div class="loading">Завантаження...</div>
+      </div>
+
+      <!-- Charts -->
+      <div class="charts-grid">
+        <div class="chart-card wide">
+          <h3>💰 Витрати та ліди по днях</h3>
+          <canvas id="chart-spend-leads"></canvas>
+        </div>
+        <div class="chart-card">
+          <h3>👆 CTR по днях (%)</h3>
+          <canvas id="chart-ctr"></canvas>
+        </div>
+        <div class="chart-card">
+          <h3>💵 Вартість ліда по днях ($)</h3>
+          <canvas id="chart-cpl"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── CAMPAIGNS ── -->
+    <div class="page" id="page-campaigns">
+      <div class="toolbar">
+        <h1>📢 Кампанії</h1>
+        <div class="period-btns">
+          <button class="period-btn active" onclick="setCampaignPeriod(7, this)">7 днів</button>
+          <button class="period-btn" onclick="setCampaignPeriod(14, this)">14 днів</button>
+          <button class="period-btn" onclick="setCampaignPeriod(30, this)">Місяць</button>
+        </div>
+      </div>
+      <div class="table-card">
+        <h3>Результати кампаній</h3>
+        <div id="campaigns-table"><div class="loading">Завантаження...</div></div>
+      </div>
+    </div>
+
+    <!-- ── AI ANALYSIS ── -->
+    <div class="page" id="page-ai">
+      <div class="toolbar">
+        <h1>🤖 AI Аналіз</h1>
+        <div class="period-btns">
+          <button class="period-btn active" onclick="setAiPeriod(7, this)">7 днів</button>
+          <button class="period-btn" onclick="setAiPeriod(14, this)">14 днів</button>
+          <button class="period-btn" onclick="setAiPeriod(30, this)">Місяць</button>
+        </div>
+        <button class="btn btn-primary" onclick="runAnalysis()">
+          <span id="analyze-spinner" style="display:none" class="spinner"></span>
+          ⚡ Запустити аналіз
+        </button>
+      </div>
+
+      <div id="ai-critical" style="margin-bottom:16px;"></div>
+
+      <div class="kpi-grid" style="grid-template-columns: 1fr 1fr 1fr;">
+        <div class="chart-card" style="grid-column:span 3;" id="ai-summary-card">
+          <h3>📋 Підсумок</h3>
+          <p id="ai-summary" class="text-muted" style="font-size:14px;line-height:1.7;">Натисніть "Запустити аналіз" щоб отримати AI-огляд ваших кампаній</p>
+        </div>
+      </div>
+
+      <div class="section-title" style="margin-top:20px;">Рекомендації</div>
+      <div id="ai-recs"><p class="text-muted">Немає рекомендацій</p></div>
+
+      <div class="section-title" style="margin-top:20px;">Гіпотези для тестування</div>
+      <div id="ai-hypo"><p class="text-muted">Немає гіпотез</p></div>
+
+      <hr class="divider">
+      <div class="section-title">📜 Історія аналізів</div>
+      <div id="ai-history"><div class="loading">Завантаження...</div></div>
+    </div>
+
+    <!-- ── CHAT ── -->
+    <div class="page" id="page-chat">
+      <div class="toolbar">
+        <h1>💬 AI Чат</h1>
+        <select id="chat-days" style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:7px 12px;border-radius:8px;">
+          <option value="7">Контекст: 7 днів</option>
+          <option value="14">Контекст: 14 днів</option>
+          <option value="30">Контекст: 30 днів</option>
+        </select>
+      </div>
+      <div class="chat-container">
+        <div class="chat-messages" id="chat-messages">
+          <div class="chat-msg ai">Привіт! Я твій AI-асистент з Meta Ads. Я маю доступ до всіх даних твого рекламного кабінету і можу відповісти на будь-яке питання: аналіз кампаній, рекомендації, пояснення метрик і більше.
+
+Запитай мене про що завгодно! Наприклад:
+• "Яка кампанія зараз найефективніша?"
+• "Чому зріс CPC за останній тиждень?"
+• "Що варто вимкнути щоб заощадити бюджет?"
+• "Скільки ми витратили на ліди цього місяця?"</div>
+        </div>
+        <div class="chat-input-row">
+          <input type="text" id="chat-input" placeholder="Запитай про свої кампанії..." onkeydown="if(event.key==='Enter')sendChat()">
+          <button class="btn btn-primary" onclick="sendChat()">
+            <span id="chat-spinner" style="display:none" class="spinner"></span>
+            Надіслати
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────
+let currentPeriod = 1;
+let campaignPeriod = 7;
+let aiPeriod = 7;
+let charts = {};
+
+// ── Navigation ─────────────────────────────────────────────────────
+function showPage(name, el) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  el.classList.add('active');
+  if (name === 'dashboard') loadDashboard();
+  if (name === 'campaigns') loadCampaigns();
+  if (name === 'ai') loadAiHistory();
+}
+
+// ── Period control ─────────────────────────────────────────────────
+function setPeriod(d, btn) {
+  currentPeriod = d;
+  document.querySelectorAll('#page-dashboard .period-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadDashboard();
+}
+function setCampaignPeriod(d, btn) {
+  campaignPeriod = d;
+  document.querySelectorAll('#page-campaigns .period-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadCampaigns();
+}
+function setAiPeriod(d, btn) {
+  aiPeriod = d;
+  document.querySelectorAll('#page-ai .period-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+// ── Fetch helpers ──────────────────────────────────────────────────
+async function apiFetch(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+// ── Dashboard ──────────────────────────────────────────────────────
+async function loadDashboard() {
+  try {
+    const [summary, ts] = await Promise.all([
+      apiFetch('/api/summary'),
+      apiFetch(`/api/timeseries?days=${Math.max(currentPeriod, 14)}`),
+    ]);
+
+    const key = currentPeriod === 1 ? 'yesterday' : `${currentPeriod}d`;
+    const s = summary[key] || {};
+    renderKPIs(s);
+    renderSpendLeadsChart(ts.slice(-Math.max(currentPeriod, 7)));
+    renderCtrChart(ts.slice(-Math.max(currentPeriod, 7)));
+    renderCplChart(ts.slice(-Math.max(currentPeriod, 7)));
+  } catch(e) {
+    document.getElementById('kpi-cards').innerHTML = `<p class="text-red">Помилка: ${e.message}</p>`;
+  }
+}
+
+function renderKPIs(s) {
+  const fmt = (v, prefix='', suffix='') => v != null ? `${prefix}${Number(v).toLocaleString('uk-UA', {maximumFractionDigits:2})}${suffix}` : '—';
+  document.getElementById('kpi-cards').innerHTML = `
+    <div class="kpi-card accent"><div class="kpi-label">💰 Витрати</div><div class="kpi-value">${fmt(s.total_spend,'$')}</div></div>
+    <div class="kpi-card"><div class="kpi-label">👁️ Покази</div><div class="kpi-value">${fmt(s.total_impressions)}</div></div>
+    <div class="kpi-card"><div class="kpi-label">🖱️ Кліки</div><div class="kpi-value">${fmt(s.total_clicks)}</div></div>
+    <div class="kpi-card green"><div class="kpi-label">🎯 Ліди</div><div class="kpi-value">${fmt(s.total_leads)}</div><div class="kpi-sub">CPL: ${fmt(s.cost_per_lead,'$')}</div></div>
+    <div class="kpi-card"><div class="kpi-label">🛒 Покупки</div><div class="kpi-value">${fmt(s.total_purchases)}</div><div class="kpi-sub">CPP: ${fmt(s.cost_per_purchase,'$')}</div></div>
+    <div class="kpi-card"><div class="kpi-label">📈 ROAS</div><div class="kpi-value">${fmt(s.roas,'','x')}</div></div>
+    <div class="kpi-card"><div class="kpi-label">👆 CTR</div><div class="kpi-value">${fmt(s.avg_ctr,'','%')}</div></div>
+    <div class="kpi-card"><div class="kpi-label">💵 CPC</div><div class="kpi-value">${fmt(s.avg_cpc,'$')}</div></div>
+    <div class="kpi-card"><div class="kpi-label">👥 Охоплення</div><div class="kpi-value">${fmt(s.total_reach)}</div></div>
+    <div class="kpi-card"><div class="kpi-label">❤️ Підписники</div><div class="kpi-value">${fmt(s.total_page_likes)}</div></div>
+    <div class="kpi-card"><div class="kpi-label">▶️ Відео</div><div class="kpi-value">${fmt(s.total_video_views)}</div></div>
+    <div class="kpi-card"><div class="kpi-label">📊 Кампаній</div><div class="kpi-value">${s.active_campaigns || 0}</div></div>
+  `;
+}
+
+function mkChart(id, config) {
+  if (charts[id]) charts[id].destroy();
+  const ctx = document.getElementById(id);
+  if (!ctx) return;
+  charts[id] = new Chart(ctx, config);
+}
+
+function chartColors(alpha=1) {
+  return {
+    blue: `rgba(79,110,247,${alpha})`,
+    green: `rgba(34,197,94,${alpha})`,
+    purple: `rgba(124,58,237,${alpha})`,
+    yellow: `rgba(245,158,11,${alpha})`,
+    red: `rgba(239,68,68,${alpha})`,
+  };
+}
+
+const baseChartOpts = {
+  responsive: true, maintainAspectRatio: true,
+  plugins: { legend: { labels: { color: '#8892a4', font: { size: 11 } } } },
+  scales: {
+    x: { ticks: { color: '#8892a4', maxTicksLimit: 10 }, grid: { color: '#2e3347' } },
+    y: { ticks: { color: '#8892a4' }, grid: { color: '#2e3347' } },
+  },
+};
+
+function renderSpendLeadsChart(ts) {
+  const labels = ts.map(r => r.date);
+  const c = chartColors();
+  mkChart('chart-spend-leads', {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Витрати ($)', data: ts.map(r => r.spend?.toFixed(2)), backgroundColor: c.blue, yAxisID: 'y' },
+        { label: 'Ліди', data: ts.map(r => r.leads), type: 'line', borderColor: c.green, backgroundColor: 'transparent', tension: .4, pointRadius: 3, yAxisID: 'y1' },
+      ],
+    },
+    options: { ...baseChartOpts, scales: { ...baseChartOpts.scales, y1: { position: 'right', ticks: { color: '#8892a4' }, grid: { display: false } } } },
+  });
+}
+
+function renderCtrChart(ts) {
+  mkChart('chart-ctr', {
+    type: 'line',
+    data: { labels: ts.map(r => r.date), datasets: [{ label: 'CTR (%)', data: ts.map(r => r.avg_ctr), borderColor: chartColors().purple, backgroundColor: chartColors(.1).purple, fill: true, tension: .4, pointRadius: 3 }] },
+    options: baseChartOpts,
+  });
+}
+
+function renderCplChart(ts) {
+  mkChart('chart-cpl', {
+    type: 'line',
+    data: { labels: ts.map(r => r.date), datasets: [{ label: 'CPL ($)', data: ts.map(r => r.cost_per_lead), borderColor: chartColors().yellow, backgroundColor: chartColors(.1).yellow, fill: true, tension: .4, pointRadius: 3 }] },
+    options: baseChartOpts,
+  });
+}
+
+// ── Campaigns ──────────────────────────────────────────────────────
+async function loadCampaigns() {
+  const el = document.getElementById('campaigns-table');
+  el.innerHTML = '<div class="loading">Завантаження...</div>';
+  try {
+    const camps = await apiFetch(`/api/campaigns?days=${campaignPeriod}`);
+    if (!camps.length) { el.innerHTML = '<div class="loading">Немає даних</div>'; return; }
+    el.innerHTML = `
+      <table>
+        <thead><tr>
+          <th>Кампанія</th><th>Статус</th><th>Ціль</th>
+          <th>Витрати</th><th>CTR</th><th>CPC</th><th>Ліди</th><th>CPL</th>
+          <th>Підписники</th><th>Покупки</th><th>ROAS</th><th>Дії</th>
+        </tr></thead>
+        <tbody>${camps.map(c => `
+          <tr>
+            <td><strong>${c.campaign_name}</strong></td>
+            <td><span class="badge badge-${c.status?.toLowerCase()}">${c.status}</span></td>
+            <td class="text-muted">${c.objective || '—'}</td>
+            <td>$${(c.spend||0).toFixed(2)}</td>
+            <td>${(c.avg_ctr||0).toFixed(2)}%</td>
+            <td>$${(c.avg_cpc||0).toFixed(2)}</td>
+            <td>${c.leads||0}</td>
+            <td>${c.cost_per_lead > 0 ? '$'+c.cost_per_lead.toFixed(2) : '—'}</td>
+            <td>${c.page_likes||0}</td>
+            <td>${c.purchases||0}</td>
+            <td>${c.roas > 0 ? c.roas+'x' : '—'}</td>
+            <td>
+              ${c.status === 'ACTIVE'
+                ? `<button class="btn btn-sm btn-danger" onclick="campaignAction('pause_campaign','${c.campaign_id}','${c.campaign_name.replace(/'/g,"\\'")}')">⏸ Зупинити</button>`
+                : `<button class="btn btn-sm btn-success" onclick="campaignAction('enable_campaign','${c.campaign_id}','${c.campaign_name.replace(/'/g,"\\'")}')">▶ Запустити</button>`
+              }
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } catch(e) {
+    el.innerHTML = `<p class="text-red" style="padding:16px">Помилка: ${e.message}</p>`;
+  }
+}
+
+async function campaignAction(action_type, id, name) {
+  if (!confirm(`${action_type === 'pause_campaign' ? 'Зупинити' : 'Запустити'} кампанію "${name}"?`)) return;
+  try {
+    await apiFetch('/api/action', { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ action_type, target_id: id, target_name: name }) });
+    alert('Виконано успішно!');
+    loadCampaigns();
+  } catch(e) { alert('Помилка: ' + e.message); }
+}
+
+// ── AI Analysis ────────────────────────────────────────────────────
+async function runAnalysis() {
+  const spinner = document.getElementById('analyze-spinner');
+  spinner.style.display = 'inline-block';
+  try {
+    const result = await apiFetch('/api/analyze', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ days: aiPeriod }),
+    });
+    renderAiResult(result);
+    loadAiHistory();
+  } catch(e) {
+    document.getElementById('ai-summary').textContent = 'Помилка: ' + e.message;
+  } finally {
+    spinner.style.display = 'none';
+  }
+}
+
+function renderAiResult(r) {
+  document.getElementById('ai-summary').textContent = r.summary || '—';
+
+  // Critical alerts
+  const alertsEl = document.getElementById('ai-critical');
+  alertsEl.innerHTML = (r.critical_alerts||[]).map(a => `
+    <div class="alert-banner">
+      <span class="icon">🚨</span>
+      <div>
+        <strong><span class="badge badge-${a.level?.toLowerCase()}">${a.level}</span> ${a.campaign_name}</strong>
+        <p style="margin-top:4px;font-size:13px;">${a.message}</p>
+        ${a.suggested_action && a.suggested_action !== 'none'
+          ? `<button class="btn btn-sm btn-danger" style="margin-top:8px" onclick="campaignAction('${a.suggested_action==='pause'?'pause_campaign':'enable_campaign'}','${a.campaign_id}','${a.campaign_name}')">Виконати: ${a.suggested_action}</button>`
+          : ''}
+      </div>
+    </div>`).join('');
+
+  // Recommendations
+  document.getElementById('ai-recs').innerHTML = (r.recommendations||[]).map(rec => `
+    <div class="rec-card">
+      <div class="rec-header">
+        <span class="badge badge-${rec.priority?.toLowerCase()}">${rec.priority}</span>
+        <span class="badge" style="background:var(--surface);border:1px solid var(--border)">${rec.category}</span>
+        <span class="rec-meta">${rec.campaign_name || 'Загально'}</span>
+      </div>
+      <div class="rec-text">${rec.text}</div>
+    </div>`).join('') || '<p class="text-muted">Немає рекомендацій</p>';
+
+  // Hypotheses
+  document.getElementById('ai-hypo').innerHTML = (r.hypotheses||[]).map(h => `
+    <div class="rec-card">
+      <div class="rec-header"><strong>💡 ${h.title}</strong></div>
+      <div class="rec-text">${h.description}</div>
+      <div class="rec-meta" style="margin-top:6px">Очікуваний ефект: ${h.expected_impact}</div>
+    </div>`).join('') || '<p class="text-muted">Немає гіпотез</p>';
+}
+
+async function loadAiHistory() {
+  const el = document.getElementById('ai-history');
+  try {
+    const recs = await apiFetch('/api/recommendations?limit=10');
+    el.innerHTML = recs.map(r => `
+      <div class="rec-card">
+        <div class="rec-header">
+          <span class="rec-meta">${r.created_at?.slice(0,16).replace('T',' ')}</span>
+          <span class="badge" style="background:var(--surface2);border:1px solid var(--border)">${r.period}</span>
+          ${r.critical_alerts?.length ? `<span class="badge badge-critical">🚨 ${r.critical_alerts.length} alerts</span>` : ''}
+        </div>
+        <div class="rec-text">${r.summary}</div>
+        ${r.recommendations?.length ? `<div class="rec-meta" style="margin-top:6px">${r.recommendations.length} рекомендацій</div>` : ''}
+      </div>`).join('') || '<p class="text-muted">Немає збережених аналізів</p>';
+  } catch(e) {
+    el.innerHTML = `<p class="text-muted">Помилка завантаження: ${e.message}</p>`;
+  }
+}
+
+// ── Chat ───────────────────────────────────────────────────────────
+async function sendChat() {
+  const input = document.getElementById('chat-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  const days = document.getElementById('chat-days').value;
+
+  appendChatMsg(msg, 'user');
+  input.value = '';
+  const spinner = document.getElementById('chat-spinner');
+  spinner.style.display = 'inline-block';
+
+  try {
+    const res = await apiFetch('/api/chat', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ message: msg, days }),
+    });
+    appendChatMsg(res.response, 'ai');
+  } catch(e) {
+    appendChatMsg('Помилка: ' + e.message, 'ai');
+  } finally {
+    spinner.style.display = 'none';
+  }
+}
+
+function appendChatMsg(text, role) {
+  const container = document.getElementById('chat-messages');
+  const el = document.createElement('div');
+  el.className = `chat-msg ${role}`;
+  el.textContent = text;
+  container.appendChild(el);
+  container.scrollTop = container.scrollHeight;
+}
+
+// ── Data collection ────────────────────────────────────────────────
+async function collectData() {
+  if (!confirm('Запустити збір свіжих даних з Meta Ads?')) return;
+  try {
+    const res = await apiFetch('/api/collect', { method: 'POST' });
+    alert(`Зібрано ${res.rows} рядків даних`);
+    loadDashboard();
+  } catch(e) { alert('Помилка: ' + e.message); }
+}
+
+// ── Init ───────────────────────────────────────────────────────────
+document.getElementById('last-update').textContent = 'Оновлено: ' + new Date().toLocaleTimeString('uk-UA');
+loadDashboard();
+</script>
+</body>
+</html>
