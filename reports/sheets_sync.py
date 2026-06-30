@@ -29,6 +29,13 @@ SCOPES = [
 TRAFFIC_KEYWORDS = ["traffic", "tof", "трафік", "traffik", "awareness", "reach", "snap"]
 LEADGEN_KEYWORDS = ["лид", "lead", "ленд", "land", "quiz", "квиз", "квіз", "форм", "form"]
 
+# Funnel classification for traffic campaigns — order matters (chatbot/bot checked before generic channel keywords)
+FUNNEL_DEFS = [
+    ("chatbot", ["chatbot", "чатбот", "чат-бот", "bot", "бот"], "telegram_bot", "Трафік на ChatBot"),
+    ("youtube", ["youtube", "ютуб", "yt"], "youtube", "Трафік на Ютуб"),
+    ("kanal", ["kanal", "канал", "channel"], "telegram_channel", "Трафік на Telegram канал"),
+]
+
 # UAH exchange rate — override with env var USD_TO_UAH_RATE
 def _uah_rate() -> float:
     try:
@@ -50,6 +57,15 @@ def _classify_campaign(name: str) -> str:
     if any(k in n for k in LEADGEN_KEYWORDS):
         return "leadgen"
     return "other"
+
+
+def _classify_funnel(name: str) -> str | None:
+    """Maps a traffic campaign name to a funnel key (matches FUNNEL_DEFS), or None if no match."""
+    n = name.lower()
+    for funnel_key, keywords, _, _ in FUNNEL_DEFS:
+        if any(k in n for k in keywords):
+            return funnel_key
+    return None
 
 
 def _ensure_worksheet(spreadsheet, title: str, rows: int = 2000, cols: int = 30):
@@ -156,6 +172,92 @@ def _build_campaign_rows(stats: dict, today: str) -> list:
             roas,
         ])
     return rows
+
+
+FUNNEL_HEADERS = [
+    "Дата", "Витрати ($)", "Покази", "Охоплення", "Кліки",
+    "CTR (%)", "CPC ($)", "CPM ($)", "Підписники всього",
+    "Нових підписників", "Вартість підписника ($)", "Конверсія клік→підписник (%)",
+]
+
+
+def _write_funnel_sheet(spreadsheet, sheet_title: str, stats: dict, channel_total: int | str):
+    """
+    Creates/updates a per-funnel tab with one row per day.
+    "Нових підписників" is computed as channel_total - previous row's "Підписники всього"
+    (the scraper only exposes a rolling 7-day delta, not a true daily delta).
+    """
+    ws = _get_or_create_with_headers(spreadsheet, sheet_title, FUNNEL_HEADERS)
+    today = date.today().isoformat()
+
+    existing = ws.get_all_values()
+    prev_rows = [r for r in existing[1:] if r and r[0] != today]
+
+    prev_total = ""
+    if prev_rows:
+        try:
+            prev_total = int(prev_rows[-1][8])
+        except (ValueError, IndexError):
+            prev_total = ""
+
+    spend = sum(s["spend"] for s in stats.values())
+    impressions = sum(s["impressions"] for s in stats.values())
+    reach = max((s["reach"] for s in stats.values()), default=0)
+    clicks = sum(s["clicks"] for s in stats.values())
+    all_ctrs = [c for s in stats.values() for c in s["ctrs"]]
+    all_cpcs = [c for s in stats.values() for c in s["cpcs"]]
+    all_cpms = [c for s in stats.values() for c in s["cpms"]]
+
+    new_subs = ""
+    if isinstance(channel_total, int) and isinstance(prev_total, int):
+        new_subs = max(channel_total - prev_total, 0)
+
+    cost_per_sub = round(spend / new_subs, 2) if new_subs and spend > 0 else ""
+    conversion = round(new_subs / clicks * 100, 2) if new_subs and clicks > 0 else ""
+
+    new_row = [
+        today,
+        round(spend, 2),
+        impressions,
+        reach,
+        clicks,
+        _avg(all_ctrs),
+        _avg(all_cpcs),
+        _avg(all_cpms),
+        channel_total,
+        new_subs,
+        cost_per_sub,
+        conversion,
+    ]
+
+    _upsert_rows(ws, FUNNEL_HEADERS, [new_row])
+
+
+def _sync_funnel_sheets(spreadsheet, label: str, traffic_today: dict, subs: dict):
+    """Splits traffic campaigns by funnel, writes one tab per funnel + a combined summary tab."""
+    by_funnel = {key: {} for key, _, _, _ in FUNNEL_DEFS}
+    unclassified = {}
+
+    for cid, s in traffic_today.items():
+        funnel_key = _classify_funnel(s["campaign_name"])
+        if funnel_key:
+            by_funnel[funnel_key][cid] = s
+        else:
+            unclassified[cid] = s
+
+    for funnel_key, keywords, channel_slug, sheet_title in FUNNEL_DEFS:
+        stats = by_funnel[funnel_key]
+        if not stats:
+            continue
+        channel_total = subs.get(channel_slug, {}).get("total", "")
+        _write_funnel_sheet(spreadsheet, sheet_title, stats, channel_total)
+        logger.info(f"Sheet '{label}' {sheet_title}: {len(stats)} кампаній")
+
+    # Combined view across all traffic funnels
+    if traffic_today:
+        total_subs = subs.get("_total", {}).get("total", "")
+        _write_funnel_sheet(spreadsheet, "Трафік - підсумок", traffic_today, total_subs)
+        logger.info(f"Sheet '{label}' Трафік - підсумок оновлено")
 
 
 # ── Червень Traffic звіт filler ─────────────────────────────────────────────
@@ -297,6 +399,9 @@ def _sync_sheet(gc, sheet_id: str, label: str, days: int = 30):
             break
         except gspread.WorksheetNotFound:
             continue
+
+    # ── Per-funnel tabs (Трафік на Ютуб / Telegram канал / ChatBot) ──
+    _sync_funnel_sheets(spreadsheet, label, traffic_today, subs)
 
     # ── Трафік (авто) — per-campaign rows ───────────────────────────
     ws_traffic = _get_or_create_with_headers(spreadsheet, "Трафік (авто)", CAMPAIGN_HEADERS)
