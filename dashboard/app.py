@@ -39,8 +39,15 @@ def index():
 
 # ─── API ─────────────────────────────────────────────────────────────────────
 
+@app.route("/api/accounts")
+def api_accounts():
+    campaigns = get_campaigns_list()
+    return jsonify(campaigns)
+
+
 @app.route("/api/summary")
 def api_summary():
+    campaign_id = request.args.get("campaign_id") or None
     periods = [
         ("yesterday", 1),
         ("3d", 3),
@@ -50,7 +57,7 @@ def api_summary():
     ]
     result = {}
     for label, days in periods:
-        result[label] = get_aggregated_metrics(days=days)
+        result[label] = get_aggregated_metrics(days=days, campaign_id=campaign_id)
     return jsonify(result)
 
 
