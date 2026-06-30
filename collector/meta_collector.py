@@ -38,16 +38,36 @@ def _init_api():
 
 
 def get_ad_accounts_from_bm(bm_id: str) -> list[dict]:
-    """Return all active ad accounts under a Business Manager."""
+    """Return all ad accounts under a Business Manager (owned + client)."""
+    result = []
+    seen = set()
+    business = Business(bm_id)
+
+    # Owned accounts
     try:
-        business = Business(bm_id)
-        accounts = business.get_owned_ad_accounts(fields=ACCOUNT_FIELDS)
-        result = [dict(a) for a in accounts]
-        logger.info(f"BM {bm_id}: found {len(result)} ad accounts")
-        return result
+        for acc in business.get_owned_ad_accounts(fields=ACCOUNT_FIELDS):
+            d = dict(acc)
+            if d.get("id") not in seen:
+                d["account_source"] = "owned"
+                result.append(d)
+                seen.add(d["id"])
+        logger.info(f"BM {bm_id}: owned accounts: {len(result)}")
     except Exception as e:
-        logger.error(f"BM {bm_id}: failed to fetch accounts — {e}")
-        return []
+        logger.warning(f"BM {bm_id}: owned accounts error — {e}")
+
+    # Client accounts
+    try:
+        for acc in business.get_client_ad_accounts(fields=ACCOUNT_FIELDS):
+            d = dict(acc)
+            if d.get("id") not in seen:
+                d["account_source"] = "client"
+                result.append(d)
+                seen.add(d["id"])
+        logger.info(f"BM {bm_id}: total accounts (incl. client): {len(result)}")
+    except Exception as e:
+        logger.warning(f"BM {bm_id}: client accounts error — {e}")
+
+    return result
 
 
 def get_all_ad_accounts() -> list[dict]:
