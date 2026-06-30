@@ -155,6 +155,17 @@ def upsert_daily_metrics(row: dict):
     conn.close()
 
 
+def get_metrics_by_date(date_iso: str) -> list[dict]:
+    """Returns all daily_metrics rows for the given date (YYYY-MM-DD)."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM daily_metrics WHERE date = ? ORDER BY campaign_name",
+        (date_iso,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def get_metrics_by_period(days: int = 7, campaign_id: str = None) -> list[dict]:
     conn = get_connection()
     query = """

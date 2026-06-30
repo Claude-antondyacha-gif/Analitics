@@ -12,12 +12,13 @@ import os
 import logging
 import warnings
 import re
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+import calendar
 
 import gspread
 from google.oauth2.service_account import Credentials
 
-from storage.database import get_metrics_by_period, get_aggregated_metrics
+from storage.database import get_metrics_by_period, get_aggregated_metrics, get_metrics_by_date
 
 logger = logging.getLogger(__name__)
 
@@ -181,25 +182,16 @@ FUNNEL_HEADERS = [
 ]
 
 
-def _write_funnel_sheet(spreadsheet, sheet_title: str, stats: dict, channel_total: int | str):
-    """
-    Creates/updates a per-funnel tab with one row per day.
-    "Нових підписників" is computed as channel_total - previous row's "Підписники всього"
-    (the scraper only exposes a rolling 7-day delta, not a true daily delta).
-    """
-    ws = _get_or_create_with_headers(spreadsheet, sheet_title, FUNNEL_HEADERS)
-    today = date.today().isoformat()
+MONTHLY_SUMMARY_HEADERS = [
+    "Місяць", "Витрати ($)", "Покази", "Охоплення", "Кліки",
+    "CTR (%)", "CPC ($)", "CPM ($)", "Підписників приросло",
+    "Вартість підписника ($)", "Конверсія клік→підписник (%)",
+]
 
-    existing = ws.get_all_values()
-    prev_rows = [r for r in existing[1:] if r and r[0] != today]
 
-    prev_total = ""
-    if prev_rows:
-        try:
-            prev_total = int(prev_rows[-1][8])
-        except (ValueError, IndexError):
-            prev_total = ""
-
+def _build_funnel_row(date_iso: str, stats: dict,
+                      channel_total: int | str, prev_total: int | str) -> list:
+    """Будує один рядок для воронкового листа."""
     spend = sum(s["spend"] for s in stats.values())
     impressions = sum(s["impressions"] for s in stats.values())
     reach = max((s["reach"] for s in stats.values()), default=0)
@@ -209,14 +201,14 @@ def _write_funnel_sheet(spreadsheet, sheet_title: str, stats: dict, channel_tota
     all_cpms = [c for s in stats.values() for c in s["cpms"]]
 
     new_subs = ""
-    if isinstance(channel_total, int) and isinstance(prev_total, int):
-        new_subs = max(channel_total - prev_total, 0)
+    if isinstance(channel_total, int) and isinstance(prev_total, int) and channel_total >= prev_total:
+        new_subs = channel_total - prev_total
 
     cost_per_sub = round(spend / new_subs, 2) if new_subs and spend > 0 else ""
     conversion = round(new_subs / clicks * 100, 2) if new_subs and clicks > 0 else ""
 
-    new_row = [
-        today,
+    return [
+        date_iso,
         round(spend, 2),
         impressions,
         reach,
@@ -230,34 +222,319 @@ def _write_funnel_sheet(spreadsheet, sheet_title: str, stats: dict, channel_tota
         conversion,
     ]
 
-    _upsert_rows(ws, FUNNEL_HEADERS, [new_row])
+
+def _build_monthly_summary_rows(data_rows: list) -> list:
+    """
+    Приймає список рядків (без заголовку), повертає рядки місячної зведки.
+    data_rows: кожен рядок відповідає FUNNEL_HEADERS.
+    """
+    monthly = {}
+    for row in data_rows:
+        if not row or len(row) < 10:
+            continue
+        d = row[0]  # YYYY-MM-DD
+        if len(d) < 7:
+            continue
+        month_key = d[:7]  # YYYY-MM
+        if month_key not in monthly:
+            monthly[month_key] = {
+                "spend": 0, "impressions": 0, "reach": 0, "clicks": 0,
+                "ctrs": [], "cpcs": [], "cpms": [],
+                "new_subs": 0,
+            }
+        m = monthly[month_key]
+        try: m["spend"] += float(row[1]) if row[1] != "" else 0
+        except: pass
+        try: m["impressions"] += int(row[2]) if row[2] != "" else 0
+        except: pass
+        try: m["reach"] = max(m["reach"], int(row[3])) if row[3] != "" else m["reach"]
+        except: pass
+        try: m["clicks"] += int(row[4]) if row[4] != "" else 0
+        except: pass
+        try:
+            if row[5] != "": m["ctrs"].append(float(row[5]))
+        except: pass
+        try:
+            if row[6] != "": m["cpcs"].append(float(row[6]))
+        except: pass
+        try:
+            if row[7] != "": m["cpms"].append(float(row[7]))
+        except: pass
+        try: m["new_subs"] += int(row[9]) if row[9] not in ("", None) else 0
+        except: pass
+
+    result = []
+    for month_key in sorted(monthly):
+        y, mo = month_key.split("-")
+        month_label = f"{calendar.month_name[int(mo)]} {y}"
+        m = monthly[month_key]
+        spend = round(m["spend"], 2)
+        new_subs = m["new_subs"]
+        clicks = m["clicks"]
+        cost_per_sub = round(spend / new_subs, 2) if new_subs and spend > 0 else ""
+        conversion = round(new_subs / clicks * 100, 2) if new_subs and clicks > 0 else ""
+        result.append([
+            f"📊 {month_label}",
+            spend,
+            m["impressions"],
+            m["reach"],
+            clicks,
+            _avg(m["ctrs"]),
+            _avg(m["cpcs"]),
+            _avg(m["cpms"]),
+            new_subs,
+            cost_per_sub,
+            conversion,
+        ])
+    return result
 
 
-def _sync_funnel_sheets(spreadsheet, label: str, traffic_today: dict, subs: dict):
-    """Splits traffic campaigns by funnel, writes one tab per funnel + a combined summary tab."""
+def _backfill_funnel_sheet(spreadsheet, sheet_title: str,
+                            funnel_key: str, channel_slug: str,
+                            all_campaign_rows: list,
+                            channel_history: dict[str, int],
+                            start_date: date):
+    """
+    Заповнює воронковий лист рядками від start_date до вчора (включно).
+    all_campaign_rows — всі рядки з БД за весь потрібний період (не тільки сьогодні).
+    channel_history — {date_iso: total} зі sfero-social.
+    Вже існуючі рядки (за датою) не перезаписуються.
+    В кінці додає місячну зведку.
+    """
+    ws = _get_or_create_with_headers(spreadsheet, sheet_title, FUNNEL_HEADERS)
+    existing = ws.get_all_values()
+    existing_dates = {r[0] for r in existing[1:] if r and r[0]}
+
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+
+    # Групуємо всі метрики по даті та воронці
+    rows_by_date: dict[str, dict] = {}
+    for r in all_campaign_rows:
+        funnel = _classify_funnel(r["campaign_name"])
+        if funnel != funnel_key:
+            continue
+        d = r["date"]
+        if d not in rows_by_date:
+            rows_by_date[d] = {}
+        cid = r["campaign_id"]
+        if cid not in rows_by_date[d]:
+            rows_by_date[d][cid] = {
+                "campaign_id": cid,
+                "campaign_name": r["campaign_name"],
+                "spend": 0, "impressions": 0, "clicks": 0,
+                "leads": 0, "link_clicks": 0, "reach": 0,
+                "video_views": 0, "page_likes": 0, "purchases": 0,
+                "purchase_value": 0, "ctrs": [], "cpcs": [], "cpms": [],
+            }
+        s = rows_by_date[d][cid]
+        s["spend"] += r["spend"]
+        s["impressions"] += r["impressions"]
+        s["clicks"] += r["clicks"]
+        s["leads"] += r["leads"]
+        s["link_clicks"] += r["link_clicks"]
+        s["reach"] = max(s["reach"], r["reach"])
+        if r["ctr"]: s["ctrs"].append(r["ctr"])
+        if r["cpc"]: s["cpcs"].append(r["cpc"])
+        if r["cpm"]: s["cpms"].append(r["cpm"])
+
+    new_rows = []
+    sorted_dates = sorted(rows_by_date.keys())
+    for date_iso in sorted_dates:
+        dt = date.fromisoformat(date_iso)
+        if dt < start_date or dt > yesterday:
+            continue
+        if date_iso in existing_dates:
+            continue  # вже є — не перезаписуємо
+
+        stats = rows_by_date[date_iso]
+        channel_total = channel_history.get(date_iso, "")
+
+        # prev_total — попередній день з channel_history
+        prev_dt = dt - timedelta(days=1)
+        prev_total = channel_history.get(prev_dt.isoformat(), "")
+
+        row = _build_funnel_row(date_iso, stats, channel_total, prev_total)
+        new_rows.append(row)
+
+    if not new_rows:
+        logger.info(f"Бекфіл {sheet_title}: нових рядків немає")
+        return
+
+    # Додаємо нові рядки (без очищення існуючих)
+    all_data_rows = [r for r in existing[1:] if r and r[0] and r[0] != ""]
+    all_data_rows += new_rows
+    all_data_rows.sort(key=lambda r: r[0])
+
+    # Місячна зведка
+    monthly_rows = _build_monthly_summary_rows(all_data_rows)
+
+    ws.clear()
+    ws.update("A1", [FUNNEL_HEADERS] + all_data_rows + [[]] + [MONTHLY_SUMMARY_HEADERS] + monthly_rows)
+    logger.info(f"Бекфіл {sheet_title}: додано {len(new_rows)} рядків, місяців: {len(monthly_rows)}")
+
+
+def _write_funnel_today(ws, sheet_title: str, stats: dict,
+                        channel_total: int | str, existing: list):
+    """Оновлює або додає рядок за сьогодні у вже відкритому worksheet."""
+    today = date.today().isoformat()
+
+    # Знаходимо попередній total з останнього рядка даних (не зведка, не порожній)
+    data_rows = [r for r in existing[1:] if r and r[0] and re.match(r'\d{4}-\d{2}-\d{2}', r[0])]
+    prev_rows = [r for r in data_rows if r[0] < today]
+
+    prev_total = ""
+    if prev_rows:
+        try:
+            prev_total = int(prev_rows[-1][8])
+        except (ValueError, IndexError):
+            prev_total = ""
+
+    new_row = _build_funnel_row(today, stats, channel_total, prev_total)
+
+    # Всі рядки без сьогодні + сьогодні + порожній + зведка
+    other_rows = [r for r in data_rows if r[0] != today]
+    all_data = sorted(other_rows + [new_row], key=lambda r: r[0])
+    monthly_rows = _build_monthly_summary_rows(all_data)
+
+    ws.clear()
+    ws.update("A1", [FUNNEL_HEADERS] + all_data + [[]] + [MONTHLY_SUMMARY_HEADERS] + monthly_rows)
+
+
+def _sync_funnel_sheets(spreadsheet, label: str, traffic_today: dict, subs: dict,
+                        backfill_from: date | None = None):
+    """
+    Splits traffic campaigns by funnel:
+    - Якщо backfill_from задано — завантажує всі дані з БД з тієї дати і заповнює пропуски
+    - Щодня оновлює рядок за сьогодні
+    - В кінці таблиці — місячна зведка
+    """
+    from reports.subscribers_scraper import scrape_channel_history
+
     by_funnel = {key: {} for key, _, _, _ in FUNNEL_DEFS}
-    unclassified = {}
-
     for cid, s in traffic_today.items():
-        funnel_key = _classify_funnel(s["campaign_name"])
-        if funnel_key:
-            by_funnel[funnel_key][cid] = s
-        else:
-            unclassified[cid] = s
+        fk = _classify_funnel(s["campaign_name"])
+        if fk:
+            by_funnel[fk][cid] = s
+
+    # Якщо бекфіл потрібен — завантажуємо всю історію з БД
+    if backfill_from:
+        days_back = (date.today() - backfill_from).days + 1
+        all_rows = get_metrics_by_period(days=days_back)
+    else:
+        all_rows = []
 
     for funnel_key, keywords, channel_slug, sheet_title in FUNNEL_DEFS:
-        stats = by_funnel[funnel_key]
-        if not stats:
-            continue
-        channel_total = subs.get(channel_slug, {}).get("total", "")
-        _write_funnel_sheet(spreadsheet, sheet_title, stats, channel_total)
-        logger.info(f"Sheet '{label}' {sheet_title}: {len(stats)} кампаній")
+        stats_today = by_funnel[funnel_key]
 
-    # Combined view across all traffic funnels
-    if traffic_today:
-        total_subs = subs.get("_total", {}).get("total", "")
-        _write_funnel_sheet(spreadsheet, "Трафік - підсумок", traffic_today, total_subs)
+        # Отримуємо щоденну історію підписників для цього каналу
+        channel_history = {}
+        try:
+            channel_history = scrape_channel_history(channel_slug)
+        except Exception as e:
+            logger.warning(f"Channel history {channel_slug}: {e}")
+
+        channel_total_today = channel_history.get(date.today().isoformat(),
+                              subs.get(channel_slug, {}).get("total", ""))
+
+        ws = _get_or_create_with_headers(spreadsheet, sheet_title, FUNNEL_HEADERS)
+        existing = ws.get_all_values()
+
+        # Спочатку бекфіл (якщо задано)
+        if backfill_from and all_rows:
+            _backfill_funnel_sheet(spreadsheet, sheet_title, funnel_key, channel_slug,
+                                   all_rows, channel_history, backfill_from)
+            existing = ws.get_all_values()  # перечитуємо після бекфілу
+
+        # Потім рядок за сьогодні (тільки якщо є кампанії)
+        if stats_today:
+            _write_funnel_today(ws, sheet_title, stats_today, channel_total_today, existing)
+            logger.info(f"Sheet '{label}' {sheet_title}: оновлено рядок {date.today().isoformat()}")
+
+    # Combined / підсумок по всьому трафіку
+    all_traffic = {cid: s for fk in by_funnel for cid, s in by_funnel[fk].items()}
+    if all_traffic:
+        total_history = {}
+        try:
+            # Сума total по всіх воронкових каналах на кожну дату
+            for _, _, channel_slug, _ in FUNNEL_DEFS:
+                ch = scrape_channel_history(channel_slug)
+                for d, v in ch.items():
+                    total_history[d] = total_history.get(d, 0) + v
+        except Exception:
+            pass
+
+        total_today = total_history.get(date.today().isoformat(),
+                      subs.get("_total", {}).get("total", ""))
+
+        ws_sum = _get_or_create_with_headers(spreadsheet, "Трафік - підсумок", FUNNEL_HEADERS)
+        existing_sum = ws_sum.get_all_values()
+
+        if backfill_from and all_rows:
+            # Бекфіл підсумку: всі воронки разом
+            # Будуємо псевдо funnel_key "all" — перевизначаємо _classify_funnel тимчасово
+            _backfill_all_traffic(spreadsheet, "Трафік - підсумок",
+                                  all_rows, total_history, backfill_from)
+            existing_sum = ws_sum.get_all_values()
+
+        _write_funnel_today(ws_sum, "Трафік - підсумок", all_traffic, total_today, existing_sum)
         logger.info(f"Sheet '{label}' Трафік - підсумок оновлено")
+
+
+def _backfill_all_traffic(spreadsheet, sheet_title: str,
+                           all_rows: list, channel_history: dict[str, int],
+                           start_date: date):
+    """Бекфіл для зведеного листа по всіх воронках разом."""
+    ws = _get_or_create_with_headers(spreadsheet, sheet_title, FUNNEL_HEADERS)
+    existing = ws.get_all_values()
+    existing_dates = {r[0] for r in existing[1:] if r and r[0]}
+
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+
+    rows_by_date: dict[str, dict] = {}
+    for r in all_rows:
+        if _classify_campaign(r["campaign_name"]) == "leadgen":
+            continue  # лідген не включаємо
+        d = r["date"]
+        if d not in rows_by_date:
+            rows_by_date[d] = {}
+        cid = r["campaign_id"]
+        if cid not in rows_by_date[d]:
+            rows_by_date[d][cid] = {
+                "campaign_id": cid, "campaign_name": r["campaign_name"],
+                "spend": 0, "impressions": 0, "clicks": 0,
+                "leads": 0, "link_clicks": 0, "reach": 0,
+                "video_views": 0, "page_likes": 0, "purchases": 0,
+                "purchase_value": 0, "ctrs": [], "cpcs": [], "cpms": [],
+            }
+        s = rows_by_date[d][cid]
+        s["spend"] += r["spend"]; s["impressions"] += r["impressions"]
+        s["clicks"] += r["clicks"]; s["reach"] = max(s["reach"], r["reach"])
+        if r["ctr"]: s["ctrs"].append(r["ctr"])
+        if r["cpc"]: s["cpcs"].append(r["cpc"])
+        if r["cpm"]: s["cpms"].append(r["cpm"])
+
+    new_rows = []
+    for date_iso in sorted(rows_by_date):
+        dt = date.fromisoformat(date_iso)
+        if dt < start_date or dt > yesterday or date_iso in existing_dates:
+            continue
+        stats = rows_by_date[date_iso]
+        channel_total = channel_history.get(date_iso, "")
+        prev_total = channel_history.get((dt - timedelta(days=1)).isoformat(), "")
+        new_rows.append(_build_funnel_row(date_iso, stats, channel_total, prev_total))
+
+    if not new_rows:
+        return
+
+    all_data = [r for r in existing[1:] if r and r[0] and re.match(r'\d{4}-\d{2}-\d{2}', r[0])]
+    all_data = sorted(all_data + new_rows, key=lambda r: r[0])
+    monthly_rows = _build_monthly_summary_rows(all_data)
+
+    ws.clear()
+    ws.update("A1", [FUNNEL_HEADERS] + all_data + [[]] + [MONTHLY_SUMMARY_HEADERS] + monthly_rows)
+    logger.info(f"Бекфіл {sheet_title}: {len(new_rows)} нових рядків")
 
 
 # ── Червень Traffic звіт filler ─────────────────────────────────────────────
@@ -401,7 +678,9 @@ def _sync_sheet(gc, sheet_id: str, label: str, days: int = 30):
             continue
 
     # ── Per-funnel tabs (Трафік на Ютуб / Telegram канал / ChatBot) ──
-    _sync_funnel_sheets(spreadsheet, label, traffic_today, subs)
+    # Бекфіл від 16.06 (старт кампаній) — заповнює пропуски у вже існуючих листах
+    campaign_start = date(2026, 6, 16)
+    _sync_funnel_sheets(spreadsheet, label, traffic_today, subs, backfill_from=campaign_start)
 
     # ── Трафік (авто) — per-campaign rows ───────────────────────────
     ws_traffic = _get_or_create_with_headers(spreadsheet, "Трафік (авто)", CAMPAIGN_HEADERS)
