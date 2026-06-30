@@ -361,8 +361,8 @@ def _backfill_funnel_sheet(spreadsheet, sheet_title: str,
         logger.info(f"Бекфіл {sheet_title}: нових рядків немає")
         return
 
-    # Додаємо нові рядки (без очищення існуючих)
-    all_data_rows = [r for r in existing[1:] if r and r[0] and r[0] != ""]
+    # Додаємо нові рядки (тільки рядки з датою YYYY-MM-DD, без зведки)
+    all_data_rows = [r for r in existing[1:] if r and r[0] and re.match(r'\d{4}-\d{2}-\d{2}', r[0])]
     all_data_rows += new_rows
     all_data_rows.sort(key=lambda r: r[0])
 
