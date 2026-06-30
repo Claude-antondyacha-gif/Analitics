@@ -138,8 +138,10 @@ def api_timeseries():
     result = []
     for d in sorted(by_date.keys()):
         s = by_date[d]
-        s["avg_ctr"] = round(sum(s.pop("ctr")) / len(s["ctr"]), 2) if s.get("ctr") else 0
-        s["avg_cpc"] = round(sum(s.pop("cpc")) / len(s["cpc"]), 2) if s.get("cpc") else 0
+        ctr_vals = s.pop("ctr", [])
+        cpc_vals = s.pop("cpc", [])
+        s["avg_ctr"] = round(sum(ctr_vals) / len(ctr_vals), 2) if ctr_vals else 0
+        s["avg_cpc"] = round(sum(cpc_vals) / len(cpc_vals), 2) if cpc_vals else 0
         s["cost_per_lead"] = round(s["spend"] / s["leads"], 2) if s["leads"] > 0 else 0
         result.append(s)
 
