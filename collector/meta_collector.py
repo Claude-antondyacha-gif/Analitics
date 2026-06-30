@@ -34,11 +34,7 @@ ACCOUNT_FIELDS = ["id", "name", "account_status", "currency", "timezone_name"]
 
 
 def _init_api():
-    FacebookAdsApi.init(
-        app_id=os.environ.get("META_APP_ID") or None,
-        app_secret=os.environ.get("META_APP_SECRET") or None,
-        access_token=os.environ["META_ACCESS_TOKEN"],
-    )
+    FacebookAdsApi.init(access_token=os.environ["META_ACCESS_TOKEN"])
 
 
 def get_ad_accounts_from_bm(bm_id: str) -> list[dict]:
