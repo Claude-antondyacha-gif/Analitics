@@ -43,6 +43,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GOOGLE_SHEET_ID_SFERO: ${{ secrets.GOOGLE_SHEET_ID_SFERO }}
+          SFERO_SOCIAL_PASSWORD: ${{ secrets.SFERO_SOCIAL_PASSWORD }}
         run: python3 scheduler.py --now
 
       - name: Upload database as artifact

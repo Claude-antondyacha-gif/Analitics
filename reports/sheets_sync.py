@@ -1,15 +1,22 @@
 """
 Google Sheets sync — appends daily metrics to existing spreadsheets.
-Creates "Трафік" and "Лідген" tabs; never modifies existing tabs.
+Creates auto-tabs; NEVER modifies existing user tabs.
+
+Auto-tabs created:
+  "Трафік (авто)"   — one row per campaign per day, traffic+other campaigns
+  "Лідген (авто)"   — one row per campaign per day, leadgen campaigns
+  "Підсумок (авто)" — aggregated metrics for 1/3/7/14/30 days
+  "Traffic звіт (авто)" — one row per day with totals + subscriber counts
 """
 import os
 import logging
+import warnings
 from datetime import datetime, date
 
 import gspread
 from google.oauth2.service_account import Credentials
 
-from storage.database import get_metrics_by_period, get_aggregated_metrics, get_latest_recommendations
+from storage.database import get_metrics_by_period, get_aggregated_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +25,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-# Keywords to classify campaign type
 TRAFFIC_KEYWORDS = ["traffic", "tof", "трафік", "traffik", "awareness", "reach"]
 LEADGEN_KEYWORDS = ["лид", "lead", "ленд", "land", "quiz", "квиз", "квіз", "форм", "form"]
 
@@ -30,7 +36,6 @@ def _get_client():
 
 
 def _classify_campaign(name: str) -> str:
-    """Returns 'traffic', 'leadgen', or 'other'."""
     n = name.lower()
     if any(k in n for k in TRAFFIC_KEYWORDS):
         return "traffic"
@@ -39,12 +44,11 @@ def _classify_campaign(name: str) -> str:
     return "other"
 
 
-def _ensure_worksheet(spreadsheet, title: str, rows: int = 2000, cols: int = 20):
+def _ensure_worksheet(spreadsheet, title: str, rows: int = 2000, cols: int = 30):
     try:
         return spreadsheet.worksheet(title)
     except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
-        return ws
+        return spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
 
 
 def _get_or_create_with_headers(spreadsheet, title: str, headers: list) -> gspread.Worksheet:
@@ -63,8 +67,16 @@ def _get_or_create_with_headers(spreadsheet, title: str, headers: list) -> gspre
     return ws
 
 
+def _upsert_rows(ws, headers, new_rows, key_col: int = 0):
+    """Replace rows where key_col matches today, append the rest."""
+    all_existing = ws.get_all_values()
+    today = date.today().isoformat()
+    filtered = [r for r in all_existing[1:] if r and r[key_col] != today]
+    ws.clear()
+    ws.update("A1", [headers] + filtered + new_rows)
+
+
 def _aggregate_campaigns(rows: list) -> dict:
-    """Aggregate metrics per campaign from row list."""
     stats = {}
     for r in rows:
         cid = r["campaign_id"]
@@ -88,37 +100,14 @@ def _aggregate_campaigns(rows: list) -> dict:
         s["page_likes"] += r["page_likes"]
         s["purchases"] += r["purchases"]
         s["purchase_value"] += r["purchase_value"]
-        if r["ctr"]: s["ctrs"].append(r["ctr"])
-        if r["cpc"]: s["cpcs"].append(r["cpc"])
-        if r["cpm"]: s["cpms"].append(r["cpm"])
+        if r["ctr"]:  s["ctrs"].append(r["ctr"])
+        if r["cpc"]:  s["cpcs"].append(r["cpc"])
+        if r["cpm"]:  s["cpms"].append(r["cpm"])
     return stats
 
 
-def _build_campaign_rows(stats: dict, today: str) -> list:
-    rows = []
-    for s in sorted(stats.values(), key=lambda x: x["spend"], reverse=True):
-        avg = lambda lst: round(sum(lst)/len(lst), 2) if lst else 0
-        cpl = round(s["spend"] / s["leads"], 2) if s["leads"] > 0 else 0
-        roas = round(s["purchase_value"] / s["spend"], 2) if s["spend"] > 0 else 0
-        rows.append([
-            today,
-            s["campaign_name"],
-            round(s["spend"], 2),
-            s["impressions"],
-            s["link_clicks"],
-            s["clicks"],
-            avg(s["ctrs"]),
-            avg(s["cpcs"]),
-            avg(s["cpms"]),
-            s["leads"],
-            cpl,
-            s["video_views"],
-            s["page_likes"],
-            s["reach"],
-            s["purchases"],
-            roas,
-        ])
-    return rows
+def _avg(lst):
+    return round(sum(lst) / len(lst), 2) if lst else 0
 
 
 CAMPAIGN_HEADERS = [
@@ -134,6 +123,99 @@ SUMMARY_HEADERS = [
     "Відео", "Охоплення", "Покупки", "ROAS",
 ]
 
+# Traffic daily report headers — matches structure of "Червень" style sheets
+TRAFFIC_REPORT_HEADERS = [
+    "Дата",
+    "Витрати ($)", "Покази", "Охоплення", "Кліки", "CTR (%)", "CPC ($)", "CPM ($)",
+    "Ліди", "Ціна ліда ($)", "Покупки", "ROAS",
+    "Відео перегляди",
+    # Subscriber columns
+    "Підписники всього",
+    "Instagram", "YouTube", "TikTok", "Facebook", "Telegram (канал)",
+    "Telegram (бот)", "LinkedIn", "Threads",
+    "Instagram (особистий)", "Facebook (особистий)",
+    "Новіх підписників (тиж)",
+]
+
+
+def _build_campaign_rows(stats: dict, today: str) -> list:
+    rows = []
+    for s in sorted(stats.values(), key=lambda x: x["spend"], reverse=True):
+        cpl = round(s["spend"] / s["leads"], 2) if s["leads"] > 0 else 0
+        roas = round(s["purchase_value"] / s["spend"], 2) if s["spend"] > 0 else 0
+        rows.append([
+            today,
+            s["campaign_name"],
+            round(s["spend"], 2),
+            s["impressions"],
+            s["link_clicks"],
+            s["clicks"],
+            _avg(s["ctrs"]),
+            _avg(s["cpcs"]),
+            _avg(s["cpms"]),
+            s["leads"],
+            cpl,
+            s["video_views"],
+            s["page_likes"],
+            s["reach"],
+            s["purchases"],
+            roas,
+        ])
+    return rows
+
+
+def _build_traffic_report_row(today: str, all_traffic_stats: dict, subs: dict) -> list:
+    """Build a single daily summary row for the traffic report sheet."""
+    # Aggregate all traffic campaigns into one daily total
+    total_spend = sum(s["spend"] for s in all_traffic_stats.values())
+    total_impressions = sum(s["impressions"] for s in all_traffic_stats.values())
+    total_reach = max((s["reach"] for s in all_traffic_stats.values()), default=0)
+    total_clicks = sum(s["clicks"] for s in all_traffic_stats.values())
+    total_leads = sum(s["leads"] for s in all_traffic_stats.values())
+    total_purchases = sum(s["purchases"] for s in all_traffic_stats.values())
+    total_purchase_value = sum(s["purchase_value"] for s in all_traffic_stats.values())
+    total_video = sum(s["video_views"] for s in all_traffic_stats.values())
+
+    all_ctrs = [c for s in all_traffic_stats.values() for c in s["ctrs"]]
+    all_cpcs = [c for s in all_traffic_stats.values() for c in s["cpcs"]]
+    all_cpms = [c for s in all_traffic_stats.values() for c in s["cpms"]]
+
+    avg_ctr = _avg(all_ctrs)
+    avg_cpc = _avg(all_cpcs)
+    avg_cpm = _avg(all_cpms)
+    cpl = round(total_spend / total_leads, 2) if total_leads > 0 else 0
+    roas = round(total_purchase_value / total_spend, 2) if total_spend > 0 else 0
+
+    # Subscriber totals from scraper (keyed by slug)
+    def sub_total(slug):
+        return subs.get(slug, {}).get("total", "")
+
+    def sub_delta(slug):
+        return subs.get(slug, {}).get("weekly_delta", "")
+
+    overall_total = subs.get("_total", {}).get("total", "")
+    overall_delta = subs.get("_total", {}).get("weekly_delta", "")
+
+    return [
+        today,
+        round(total_spend, 2), total_impressions, total_reach, total_clicks,
+        avg_ctr, avg_cpc, avg_cpm,
+        total_leads, cpl, total_purchases, roas,
+        total_video,
+        overall_total,
+        sub_total("instagram"),
+        sub_total("youtube"),
+        sub_total("tiktok"),
+        sub_total("facebook"),
+        sub_total("telegram_channel"),
+        sub_total("telegram_bot"),
+        sub_total("linkedin"),
+        sub_total("threads"),
+        sub_total("instagram_personal"),
+        sub_total("facebook_personal"),
+        overall_delta,
+    ]
+
 
 def _sync_sheet(gc, sheet_id: str, label: str, days: int = 30):
     try:
@@ -146,9 +228,7 @@ def _sync_sheet(gc, sheet_id: str, label: str, days: int = 30):
     rows_all = get_metrics_by_period(days=days)
     rows_today = get_metrics_by_period(days=1)
 
-    # Classify campaigns
     today_stats = _aggregate_campaigns(rows_today)
-    all_stats = _aggregate_campaigns(rows_all)
 
     traffic_today = {k: v for k, v in today_stats.items()
                      if _classify_campaign(v["campaign_name"]) == "traffic"}
@@ -157,28 +237,37 @@ def _sync_sheet(gc, sheet_id: str, label: str, days: int = 30):
     other_today = {k: v for k, v in today_stats.items()
                    if _classify_campaign(v["campaign_name"]) == "other"}
 
-    # ── Трафік tab ──────────────────────────────────────────────────
+    # ── Трафік (авто) — per-campaign rows ───────────────────────────
     ws_traffic = _get_or_create_with_headers(spreadsheet, "Трафік (авто)", CAMPAIGN_HEADERS)
     traffic_rows = _build_campaign_rows({**traffic_today, **other_today}, today)
     if traffic_rows:
-        # Remove today's rows if already exist, then append fresh
-        all_existing = ws_traffic.get_all_values()
-        filtered = [r for r in all_existing if r and r[0] != today]
-        ws_traffic.clear()
-        ws_traffic.update("A1", [CAMPAIGN_HEADERS] + filtered[1:] + traffic_rows)
+        _upsert_rows(ws_traffic, CAMPAIGN_HEADERS, traffic_rows)
         logger.info(f"Sheet '{label}' Трафік: {len(traffic_rows)} рядків за {today}")
 
-    # ── Лідген tab ──────────────────────────────────────────────────
+    # ── Лідген (авто) — per-campaign rows ───────────────────────────
     ws_leadgen = _get_or_create_with_headers(spreadsheet, "Лідген (авто)", CAMPAIGN_HEADERS)
     leadgen_rows = _build_campaign_rows(leadgen_today, today)
     if leadgen_rows:
-        all_existing = ws_leadgen.get_all_values()
-        filtered = [r for r in all_existing if r and r[0] != today]
-        ws_leadgen.clear()
-        ws_leadgen.update("A1", [CAMPAIGN_HEADERS] + filtered[1:] + leadgen_rows)
+        _upsert_rows(ws_leadgen, CAMPAIGN_HEADERS, leadgen_rows)
         logger.info(f"Sheet '{label}' Лідген: {len(leadgen_rows)} рядків за {today}")
 
-    # ── Підсумок tab ────────────────────────────────────────────────
+    # ── Traffic звіт (авто) — daily totals + subscribers ────────────
+    # Fetch subscriber data (suppress SSL warnings for self-signed cert)
+    subs = {}
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from reports.subscribers_scraper import scrape_subscribers
+            subs = scrape_subscribers()
+    except Exception as e:
+        logger.warning(f"Subscriber scrape failed (non-critical): {e}")
+
+    ws_report = _get_or_create_with_headers(spreadsheet, "Traffic звіт (авто)", TRAFFIC_REPORT_HEADERS)
+    report_row = _build_traffic_report_row(today, {**traffic_today, **other_today}, subs)
+    _upsert_rows(ws_report, TRAFFIC_REPORT_HEADERS, [report_row])
+    logger.info(f"Sheet '{label}' Traffic звіт: оновлено за {today}")
+
+    # ── Підсумок (авто) ──────────────────────────────────────────────
     ws_summary = _get_or_create_with_headers(spreadsheet, "Підсумок (авто)", SUMMARY_HEADERS)
     now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
     period_defs = [(1, "Вчора"), (3, "3 дні"), (7, "7 днів"), (14, "2 тижні"), (30, "Місяць")]
