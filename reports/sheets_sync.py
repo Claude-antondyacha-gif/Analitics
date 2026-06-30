@@ -1,16 +1,17 @@
 """
-Google Sheets sync — appends daily metrics to existing spreadsheets.
-Creates auto-tabs; NEVER modifies existing user tabs.
+Google Sheets sync — fills existing user sheets + creates helper auto-tabs.
 
-Auto-tabs created:
-  "Трафік (авто)"   — one row per campaign per day, traffic+other campaigns
-  "Лідген (авто)"   — one row per campaign per day, leadgen campaigns
-  "Підсумок (авто)" — aggregated metrics for 1/3/7/14/30 days
-  "Traffic звіт (авто)" — one row per day with totals + subscriber counts
+For Sfero:
+  - Fills "Червень Traffic  - звіт " (existing sheet) — finds today's row by date,
+    writes ad metrics + new subscriber count from sfero-social scraper.
+  - Creates "Трафік (авто)", "Лідген (авто)", "Підсумок (авто)" auto-tabs.
+
+NEVER deletes or overwrites existing data in user tabs except the matched date row.
 """
 import os
 import logging
 import warnings
+import re
 from datetime import datetime, date
 
 import gspread
@@ -25,8 +26,15 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-TRAFFIC_KEYWORDS = ["traffic", "tof", "трафік", "traffik", "awareness", "reach"]
+TRAFFIC_KEYWORDS = ["traffic", "tof", "трафік", "traffik", "awareness", "reach", "snap"]
 LEADGEN_KEYWORDS = ["лид", "lead", "ленд", "land", "quiz", "квиз", "квіз", "форм", "form"]
+
+# UAH exchange rate — override with env var USD_TO_UAH_RATE
+def _uah_rate() -> float:
+    try:
+        return float(os.environ.get("USD_TO_UAH_RATE", "41.5"))
+    except ValueError:
+        return 41.5
 
 
 def _get_client():
@@ -123,20 +131,6 @@ SUMMARY_HEADERS = [
     "Відео", "Охоплення", "Покупки", "ROAS",
 ]
 
-# Traffic daily report headers — matches structure of "Червень" style sheets
-TRAFFIC_REPORT_HEADERS = [
-    "Дата",
-    "Витрати ($)", "Покази", "Охоплення", "Кліки", "CTR (%)", "CPC ($)", "CPM ($)",
-    "Ліди", "Ціна ліда ($)", "Покупки", "ROAS",
-    "Відео перегляди",
-    # Subscriber columns
-    "Підписники всього",
-    "Instagram", "YouTube", "TikTok", "Facebook", "Telegram (канал)",
-    "Telegram (бот)", "LinkedIn", "Threads",
-    "Instagram (особистий)", "Facebook (особистий)",
-    "Новіх підписників (тиж)",
-]
-
 
 def _build_campaign_rows(stats: dict, today: str) -> list:
     rows = []
@@ -164,57 +158,100 @@ def _build_campaign_rows(stats: dict, today: str) -> list:
     return rows
 
 
-def _build_traffic_report_row(today: str, all_traffic_stats: dict, subs: dict) -> list:
-    """Build a single daily summary row for the traffic report sheet."""
-    # Aggregate all traffic campaigns into one daily total
-    total_spend = sum(s["spend"] for s in all_traffic_stats.values())
-    total_impressions = sum(s["impressions"] for s in all_traffic_stats.values())
-    total_reach = max((s["reach"] for s in all_traffic_stats.values()), default=0)
-    total_clicks = sum(s["clicks"] for s in all_traffic_stats.values())
-    total_leads = sum(s["leads"] for s in all_traffic_stats.values())
-    total_purchases = sum(s["purchases"] for s in all_traffic_stats.values())
-    total_purchase_value = sum(s["purchase_value"] for s in all_traffic_stats.values())
-    total_video = sum(s["video_views"] for s in all_traffic_stats.values())
+# ── Червень Traffic звіт filler ─────────────────────────────────────────────
 
-    all_ctrs = [c for s in all_traffic_stats.values() for c in s["ctrs"]]
-    all_cpcs = [c for s in all_traffic_stats.values() for c in s["cpcs"]]
-    all_cpms = [c for s in all_traffic_stats.values() for c in s["cpms"]]
+def _normalize_date_cell(cell: str) -> str:
+    """Convert 'DD.MM.YYYY' or 'YYYY-MM-DD' to 'YYYY-MM-DD' for comparison."""
+    cell = cell.strip()
+    # DD.MM.YYYY or D.M.YYYY
+    m = re.match(r'^(\d{1,2})\.(\d{1,2})\.(\d{4})$', cell)
+    if m:
+        d, mo, y = m.groups()
+        return f"{y}-{mo.zfill(2)}-{d.zfill(2)}"
+    return cell  # already ISO or unknown
+
+
+def _fill_traffic_report_sheet(spreadsheet, sheet_name: str,
+                                traffic_stats: dict, subs: dict):
+    """
+    Finds today's row in the existing traffic report sheet by date and fills it.
+    Columns (1-based):
+      A=ДЕНЬ, B=БЮДЖЕТ$, C=БЮДЖЕТ грн, D=ОХОПЛЕННЯ, E=ПОКАЗИ,
+      F=ЧАСТОТА, G=CPM$, H=КЛІКИ УСІ, I=ЦІНА КЛІКА,
+      J=CTR%, K=НОВИХ ПІДПИСНИКІВ, L=ВАРТІСТЬ ПІДПИСНИКА, M=КОНВЕРСІЯ
+    """
+    try:
+        ws = spreadsheet.worksheet(sheet_name)
+    except gspread.WorksheetNotFound:
+        logger.warning(f"Sheet '{sheet_name}' not found — skipping traffic report fill")
+        return
+
+    today_iso = date.today().isoformat()
+    # Also build DD.MM.YYYY format to match cells
+    today_dt = date.today()
+    today_dmY = today_dt.strftime("%-d.%-m.%Y")   # e.g. 30.6.2026
+    today_ddmmYYYY = today_dt.strftime("%d.%m.%Y") # e.g. 30.06.2026
+
+    all_values = ws.get_all_values()
+
+    # Find the row index (1-based for Sheets API)
+    target_row = None
+    for i, row in enumerate(all_values):
+        if not row:
+            continue
+        cell = row[0].strip()
+        normalized = _normalize_date_cell(cell)
+        if normalized == today_iso or cell in (today_dmY, today_ddmmYYYY, today_iso):
+            target_row = i + 1  # 1-based
+            break
+
+    if target_row is None:
+        logger.warning(f"Date {today_iso} not found in '{sheet_name}' — cannot fill row")
+        return
+
+    # Aggregate traffic metrics
+    total_spend = sum(s["spend"] for s in traffic_stats.values())
+    total_impressions = sum(s["impressions"] for s in traffic_stats.values())
+    total_reach = max((s["reach"] for s in traffic_stats.values()), default=0)
+    total_clicks = sum(s["clicks"] for s in traffic_stats.values())
+
+    all_ctrs = [c for s in traffic_stats.values() for c in s["ctrs"]]
+    all_cpcs = [c for s in traffic_stats.values() for c in s["cpcs"]]
+    all_cpms = [c for s in traffic_stats.values() for c in s["cpms"]]
 
     avg_ctr = _avg(all_ctrs)
     avg_cpc = _avg(all_cpcs)
     avg_cpm = _avg(all_cpms)
-    cpl = round(total_spend / total_leads, 2) if total_leads > 0 else 0
-    roas = round(total_purchase_value / total_spend, 2) if total_spend > 0 else 0
+    frequency = round(total_impressions / total_reach, 2) if total_reach > 0 else 0
 
-    # Subscriber totals from scraper (keyed by slug)
-    def sub_total(slug):
-        return subs.get(slug, {}).get("total", "")
+    uah = _uah_rate()
+    spend_uah = round(total_spend * uah, 2)
 
-    def sub_delta(slug):
-        return subs.get(slug, {}).get("weekly_delta", "")
+    # Subscribers: use weekly delta as "new subscribers this period"
+    new_subs = subs.get("_total", {}).get("weekly_delta", "")
+    cost_per_sub = round(total_spend / new_subs, 2) if new_subs and total_spend > 0 else ""
+    conversion = round(new_subs / total_clicks * 100, 2) if new_subs and total_clicks > 0 else ""
 
-    overall_total = subs.get("_total", {}).get("total", "")
-    overall_delta = subs.get("_total", {}).get("weekly_delta", "")
-
-    return [
-        today,
-        round(total_spend, 2), total_impressions, total_reach, total_clicks,
-        avg_ctr, avg_cpc, avg_cpm,
-        total_leads, cpl, total_purchases, roas,
-        total_video,
-        overall_total,
-        sub_total("instagram"),
-        sub_total("youtube"),
-        sub_total("tiktok"),
-        sub_total("facebook"),
-        sub_total("telegram_channel"),
-        sub_total("telegram_bot"),
-        sub_total("linkedin"),
-        sub_total("threads"),
-        sub_total("instagram_personal"),
-        sub_total("facebook_personal"),
-        overall_delta,
+    # Build values for columns B–M (leaving A=date as-is)
+    values = [
+        round(total_spend, 2),   # B: БЮДЖЕТ $
+        spend_uah,               # C: БЮДЖЕТ грн
+        total_reach,             # D: ОХОПЛЕННЯ
+        total_impressions,       # E: ПОКАЗИ
+        frequency,               # F: ЧАСТОТА
+        avg_cpm,                 # G: CPM $
+        total_clicks,            # H: КЛІКИ УСІ
+        avg_cpc,                 # I: ЦІНА КЛІКА
+        avg_ctr,                 # J: CTR %
+        new_subs,                # K: НОВИХ ПІДПИСНИКІВ
+        cost_per_sub,            # L: ВАРТІСТЬ ПІДПИСНИКА
+        conversion,              # M: КОНВЕРСІЯ В ПІДПИСКУ
     ]
+
+    # Write to row, starting from column B (col index 2)
+    cell_range = f"B{target_row}:M{target_row}"
+    ws.update(cell_range, [values])
+    logger.info(f"Filled '{sheet_name}' row {target_row} ({today_iso}): spend=${total_spend:.2f}, reach={total_reach}, subs_new={new_subs}")
 
 
 def _sync_sheet(gc, sheet_id: str, label: str, days: int = 30):
@@ -225,21 +262,38 @@ def _sync_sheet(gc, sheet_id: str, label: str, days: int = 30):
         return
 
     today = date.today().isoformat()
-    rows_all = get_metrics_by_period(days=days)
     rows_today = get_metrics_by_period(days=1)
 
     today_stats = _aggregate_campaigns(rows_today)
 
     traffic_today = {k: v for k, v in today_stats.items()
-                     if _classify_campaign(v["campaign_name"]) == "traffic"}
+                     if _classify_campaign(v["campaign_name"]) in ("traffic", "other")}
     leadgen_today = {k: v for k, v in today_stats.items()
                      if _classify_campaign(v["campaign_name"]) == "leadgen"}
-    other_today = {k: v for k, v in today_stats.items()
-                   if _classify_campaign(v["campaign_name"]) == "other"}
+
+    # ── Fetch subscriber data ────────────────────────────────────────
+    subs = {}
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from reports.subscribers_scraper import scrape_subscribers
+            subs = scrape_subscribers()
+    except Exception as e:
+        logger.warning(f"Subscriber scrape failed (non-critical): {e}")
+
+    # ── Fill existing "Червень Traffic  - звіт " sheet ───────────────
+    # Try both exact name variants (with/without trailing space)
+    for sheet_name in ["Червень Traffic  - звіт ", "Червень Traffic  - звіт", "Червень Traffic - звіт"]:
+        try:
+            ws_check = spreadsheet.worksheet(sheet_name)
+            _fill_traffic_report_sheet(spreadsheet, sheet_name, traffic_today, subs)
+            break
+        except gspread.WorksheetNotFound:
+            continue
 
     # ── Трафік (авто) — per-campaign rows ───────────────────────────
     ws_traffic = _get_or_create_with_headers(spreadsheet, "Трафік (авто)", CAMPAIGN_HEADERS)
-    traffic_rows = _build_campaign_rows({**traffic_today, **other_today}, today)
+    traffic_rows = _build_campaign_rows(traffic_today, today)
     if traffic_rows:
         _upsert_rows(ws_traffic, CAMPAIGN_HEADERS, traffic_rows)
         logger.info(f"Sheet '{label}' Трафік: {len(traffic_rows)} рядків за {today}")
@@ -250,22 +304,6 @@ def _sync_sheet(gc, sheet_id: str, label: str, days: int = 30):
     if leadgen_rows:
         _upsert_rows(ws_leadgen, CAMPAIGN_HEADERS, leadgen_rows)
         logger.info(f"Sheet '{label}' Лідген: {len(leadgen_rows)} рядків за {today}")
-
-    # ── Traffic звіт (авто) — daily totals + subscribers ────────────
-    # Fetch subscriber data (suppress SSL warnings for self-signed cert)
-    subs = {}
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            from reports.subscribers_scraper import scrape_subscribers
-            subs = scrape_subscribers()
-    except Exception as e:
-        logger.warning(f"Subscriber scrape failed (non-critical): {e}")
-
-    ws_report = _get_or_create_with_headers(spreadsheet, "Traffic звіт (авто)", TRAFFIC_REPORT_HEADERS)
-    report_row = _build_traffic_report_row(today, {**traffic_today, **other_today}, subs)
-    _upsert_rows(ws_report, TRAFFIC_REPORT_HEADERS, [report_row])
-    logger.info(f"Sheet '{label}' Traffic звіт: оновлено за {today}")
 
     # ── Підсумок (авто) ──────────────────────────────────────────────
     ws_summary = _get_or_create_with_headers(spreadsheet, "Підсумок (авто)", SUMMARY_HEADERS)
