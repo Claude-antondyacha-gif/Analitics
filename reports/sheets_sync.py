@@ -390,13 +390,14 @@ def _backfill_funnel_sheet(spreadsheet, sheet_title: str,
 
 
 def _write_funnel_today(ws, sheet_title: str, stats: dict,
-                        channel_total: int | str, existing: list):
+                        channel_total: int | str, existing: list,
+                        target_date: date | None = None):
     """
-    Оновлює або додає рядок за сьогодні — без ws.clear().
+    Оновлює або додає рядок за target_date (default: вчора) — без ws.clear().
     Знаходить рядок за датою і пише тільки в нього.
     "За місяць" рядок (з формулами) не чіпаємо.
     """
-    today = date.today().isoformat()
+    today = (target_date or date.today() - timedelta(days=1)).isoformat()
 
     # Знаходимо попередній total з останнього рядка з датою (col L = індекс 11)
     data_rows = [r for r in existing[1:] if r and r[0] and re.match(r'\d{4}-\d{2}-\d{2}', r[0])]
@@ -429,6 +430,40 @@ def _write_funnel_today(ws, sheet_title: str, stats: dict,
         ws.update(f"A{last_date_row + 1}", [new_row])
 
 
+def _prepare_month_skeleton(ws, year: int, month: int):
+    """
+    Додає рядки-кістяк (тільки дата в колонці A) для кожного дня місяця,
+    якщо цього дня ще немає в листі. Не чіпає існуючі рядки.
+    Вставляє після останнього датового рядка.
+    """
+    num_days = calendar.monthrange(year, month)[1]
+    month_dates = [
+        date(year, month, d).isoformat()
+        for d in range(1, num_days + 1)
+    ]
+
+    existing = ws.get_all_values()
+    existing_dates = {r[0] for r in existing if r and r[0]}
+
+    # Знаходимо останній рядок з датою
+    last_row = 1
+    for i, r in enumerate(existing):
+        if r and r[0] and re.match(r'\d{4}-\d{2}-\d{2}', r[0]):
+            last_row = i + 1
+
+    added = 0
+    for d_iso in month_dates:
+        if d_iso in existing_dates:
+            continue
+        last_row += 1
+        ws.update(f"A{last_row}", [[d_iso]])
+        existing_dates.add(d_iso)
+        added += 1
+
+    if added:
+        logger.info(f"Skeleton {ws.title}: додано {added} дат на {year}-{month:02d}")
+
+
 def _sync_funnel_sheets(spreadsheet, label: str, traffic_today: dict, subs: dict,
                         backfill_from: date | None = None):
     """
@@ -452,32 +487,39 @@ def _sync_funnel_sheets(spreadsheet, label: str, traffic_today: dict, subs: dict
     else:
         all_rows = []
 
-    for funnel_key, keywords, channel_slug, sheet_title in FUNNEL_DEFS:
-        stats_today = by_funnel[funnel_key]
+    yesterday = date.today() - timedelta(days=1)
 
-        # Отримуємо щоденну історію підписників для цього каналу
+    for funnel_key, keywords, channel_slug, sheet_title in FUNNEL_DEFS:
+        stats_yesterday = by_funnel[funnel_key]
+
+        # Щоденна історія підписників
         channel_history = {}
         try:
             channel_history = scrape_channel_history(channel_slug)
         except Exception as e:
             logger.warning(f"Channel history {channel_slug}: {e}")
 
-        channel_total_today = channel_history.get(date.today().isoformat(),
-                              subs.get(channel_slug, {}).get("total", ""))
+        channel_total_yesterday = channel_history.get(yesterday.isoformat(),
+                                  subs.get(channel_slug, {}).get("total", ""))
 
         ws = _get_or_create_with_headers(spreadsheet, sheet_title, FUNNEL_HEADERS)
         existing = ws.get_all_values()
 
-        # Спочатку бекфіл (якщо задано)
+        # Бекфіл пропущених дат (якщо задано)
         if backfill_from and all_rows:
             _backfill_funnel_sheet(spreadsheet, sheet_title, funnel_key, channel_slug,
                                    all_rows, channel_history, backfill_from)
-            existing = ws.get_all_values()  # перечитуємо після бекфілу
+            existing = ws.get_all_values()
 
-        # Потім рядок за сьогодні (тільки якщо є кампанії)
-        if stats_today:
-            _write_funnel_today(ws, sheet_title, stats_today, channel_total_today, existing)
-            logger.info(f"Sheet '{label}' {sheet_title}: оновлено рядок {date.today().isoformat()}")
+        # Кістяк поточного місяця (дати без даних)
+        _prepare_month_skeleton(ws, date.today().year, date.today().month)
+        existing = ws.get_all_values()
+
+        # Запис за вчора (тільки якщо є кампанії)
+        if stats_yesterday:
+            _write_funnel_today(ws, sheet_title, stats_yesterday,
+                                channel_total_yesterday, existing, yesterday)
+            logger.info(f"Sheet '{label}' {sheet_title}: заповнено {yesterday.isoformat()}")
 
     # Combined / підсумок по всьому трафіку
     all_traffic = {cid: s for fk in by_funnel for cid, s in by_funnel[fk].items()}
@@ -492,20 +534,23 @@ def _sync_funnel_sheets(spreadsheet, label: str, traffic_today: dict, subs: dict
         except Exception:
             pass
 
-        total_today = total_history.get(date.today().isoformat(),
-                      subs.get("_total", {}).get("total", ""))
+        total_yesterday = total_history.get(yesterday.isoformat(),
+                          subs.get("_total", {}).get("total", ""))
 
         ws_sum = _get_or_create_with_headers(spreadsheet, "Трафік - підсумок", FUNNEL_HEADERS)
         existing_sum = ws_sum.get_all_values()
 
         if backfill_from and all_rows:
-            # Бекфіл підсумку: всі воронки разом
-            # Будуємо псевдо funnel_key "all" — перевизначаємо _classify_funnel тимчасово
             _backfill_all_traffic(spreadsheet, "Трафік - підсумок",
                                   all_rows, total_history, backfill_from)
             existing_sum = ws_sum.get_all_values()
 
-        _write_funnel_today(ws_sum, "Трафік - підсумок", all_traffic, total_today, existing_sum)
+        # Кістяк поточного місяця
+        _prepare_month_skeleton(ws_sum, date.today().year, date.today().month)
+        existing_sum = ws_sum.get_all_values()
+
+        _write_funnel_today(ws_sum, "Трафік - підсумок", all_traffic,
+                            total_yesterday, existing_sum, yesterday)
         logger.info(f"Sheet '{label}' Трафік - підсумок оновлено")
 
 
