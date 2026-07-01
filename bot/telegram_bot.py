@@ -25,11 +25,28 @@ except Exception as _e:
     logger.warning(f"DB init skipped: {_e}")
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-ALLOWED_CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID", "0"))
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 GITHUB_TOKEN = os.environ.get("GITHUB_PAT", "")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "Claude-antondyacha-gif/Analitics")
 GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID_SFERO", "")
+
+# Access control: comma-separated list of allowed chat IDs.
+# If ALLOWED_CHAT_IDS is set — only those IDs can use the bot.
+# If only TELEGRAM_CHAT_ID is set — only that ID.
+# If neither is set — bot is open to everyone.
+def _build_allowed_ids() -> set[int]:
+    ids: set[int] = set()
+    raw = os.environ.get("ALLOWED_CHAT_IDS", "")
+    for part in raw.split(","):
+        part = part.strip()
+        if part.lstrip("-").isdigit():
+            ids.add(int(part))
+    single = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if single.lstrip("-").isdigit():
+        ids.add(int(single))
+    return ids
+
+ALLOWED_IDS = _build_allowed_ids()
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -463,7 +480,7 @@ def handle_update(update: dict):
     chat_id = message["chat"]["id"]
     text = message.get("text", "").strip()
 
-    if ALLOWED_CHAT_ID and chat_id != ALLOWED_CHAT_ID:
+    if ALLOWED_IDS and chat_id not in ALLOWED_IDS:
         send_message(chat_id, "⛔ Доступ заборонено.")
         return
 
