@@ -60,15 +60,25 @@ def send_typing(chat_id: int):
 
 # ── GitHub helpers ───────────────────────────────────────────────────────────
 
-def trigger_github_sync() -> bool:
+def trigger_github_sync() -> tuple[bool, str]:
+    """Returns (success, error_message)."""
     if not GITHUB_TOKEN:
-        return False
+        return False, "Змінна GITHUB_PAT не встановлена в Railway"
     url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/daily_collect.yml/dispatches"
-    resp = requests.post(url, headers={
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json",
-    }, json={"ref": "main"}, timeout=15)
-    return resp.status_code == 204
+    try:
+        resp = requests.post(url, headers={
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json",
+        }, json={"ref": "main"}, timeout=15)
+        if resp.status_code == 204:
+            return True, ""
+        try:
+            detail = resp.json().get("message", resp.text[:200])
+        except Exception:
+            detail = resp.text[:200]
+        return False, f"GitHub API: {resp.status_code} — {detail}"
+    except Exception as e:
+        return False, str(e)
 
 
 def get_last_workflow_status() -> str:
@@ -484,11 +494,11 @@ def handle_update(update: dict):
     # /sync
     if text == "/sync":
         send_message(chat_id, "⏳ Запускаю синк...")
-        ok = trigger_github_sync()
+        ok, err = trigger_github_sync()
         if ok:
             send_message(chat_id, "✅ GitHub Actions запущено!\nДані оновляться за ~5 хвилин.")
         else:
-            send_message(chat_id, "❌ Не вдалося запустити. Перевір GitHub PAT токен.")
+            send_message(chat_id, f"❌ Не вдалося запустити\n\n<code>{err}</code>")
         return
 
     # /status
