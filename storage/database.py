@@ -166,13 +166,23 @@ def get_metrics_by_date(date_iso: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def get_metrics_by_period(days: int = 7, campaign_id: str = None) -> list[dict]:
+def get_metrics_by_period(days: int = 7, campaign_id: str = None,
+                          objective: str = None) -> list[dict]:
     conn = get_connection()
-    query = """
-        SELECT * FROM daily_metrics
-        WHERE date >= date('now', :offset)
-    """
-    params = {"offset": f"-{days} days"}
+    if objective:
+        query = """
+            SELECT m.* FROM daily_metrics m
+            JOIN campaigns c ON m.campaign_id = c.id
+            WHERE m.date >= date('now', :offset)
+            AND c.objective = :objective
+        """
+        params = {"offset": f"-{days} days", "objective": objective}
+    else:
+        query = """
+            SELECT * FROM daily_metrics
+            WHERE date >= date('now', :offset)
+        """
+        params = {"offset": f"-{days} days"}
     if campaign_id:
         query += " AND campaign_id = :campaign_id"
         params["campaign_id"] = campaign_id
