@@ -432,36 +432,95 @@ def _write_funnel_today(ws, sheet_title: str, stats: dict,
 
 def _prepare_month_skeleton(ws, year: int, month: int):
     """
-    Додає рядки-кістяк (тільки дата в колонці A) для кожного дня місяця,
-    якщо цього дня ще немає в листі. Не чіпає існуючі рядки.
-    Вставляє після останнього датового рядка.
+    Додає кістяк місяця під існуючі дані:
+    - рядки з датами (col A) для кожного дня місяця
+    - рядок "За місяць" з формулами SUM/розрахунок внизу
+    Структура відповідає скріншоту: дані → За місяць.
+    Не чіпає існуючі рядки.
     """
     num_days = calendar.monthrange(year, month)[1]
-    month_dates = [
-        date(year, month, d).isoformat()
-        for d in range(1, num_days + 1)
-    ]
+    month_prefix = f"{year}-{month:02d}"
+    month_dates = [date(year, month, d).isoformat() for d in range(1, num_days + 1)]
 
     existing = ws.get_all_values()
     existing_dates = {r[0] for r in existing if r and r[0]}
 
-    # Знаходимо останній рядок з датою
-    last_row = 1
+    # Перевіряємо чи кістяк цього місяця вже є
+    month_dates_present = [d for d in month_dates if d in existing_dates]
+    if len(month_dates_present) == num_days:
+        return  # вже повний кістяк — нічого не робимо
+
+    # Знаходимо останній рядок з датою в таблиці
+    last_data_row = 1
     for i, r in enumerate(existing):
         if r and r[0] and re.match(r'\d{4}-\d{2}-\d{2}', r[0]):
-            last_row = i + 1
+            last_data_row = i + 1
 
-    added = 0
+    # Вставляємо дати поточного місяця яких ще немає
+    first_new_row = last_data_row + 1
     for d_iso in month_dates:
         if d_iso in existing_dates:
             continue
-        last_row += 1
-        ws.update(f"A{last_row}", [[d_iso]])
+        ws.update(f"A{first_new_row}", [[d_iso]])
         existing_dates.add(d_iso)
-        added += 1
+        first_new_row += 1
 
-    if added:
-        logger.info(f"Skeleton {ws.title}: додано {added} дат на {year}-{month:02d}")
+    # Рядок "За місяць" з формулами — одразу після останньої дати місяця
+    # Знаходимо sheet-рядки де дати цього місяця
+    existing = ws.get_all_values()
+    month_sheet_rows = [
+        i + 1 for i, r in enumerate(existing)
+        if r and r[0] and r[0].startswith(month_prefix)
+    ]
+
+    if not month_sheet_rows:
+        return
+
+    r_first = month_sheet_rows[0]   # перший рядок місяця
+    r_last  = month_sheet_rows[-1]  # останній рядок місяця
+    r_summary = r_last + 1
+
+    # Перевіряємо чи рядок "За місяць" вже є
+    if r_summary - 1 < len(existing) and existing[r_summary - 1]:
+        existing_val = existing[r_summary - 1][0] if existing[r_summary - 1] else ""
+        if existing_val == "За місяць":
+            return  # вже є
+
+    # Формули — відповідають структурі FUNNEL_HEADERS
+    # B=spend C=imp D=reach E=clicks F=CTR G=CPC H=CPM I=new_subs J=cost_sub K=conv L=total_subs
+    B = f"B{r_first}:B{r_last}"
+    C = f"C{r_first}:C{r_last}"
+    D = f"D{r_first}:D{r_last}"
+    E = f"E{r_first}:E{r_last}"
+    I_ = f"I{r_first}:I{r_last}"
+
+    summary_row = [
+        "За місяць",
+        f"=SUM({B})",                                      # B: Витрати
+        f"=SUM({C})",                                      # C: Покази
+        f"=SUM({D})",                                      # D: Охоплення
+        f"=SUM({E})",                                      # E: Кліки
+        f"=IFERROR(SUM({E})/SUM({C})*100,0)",             # F: CTR %
+        f"=IFERROR(SUM({B})/SUM({E}),0)",                 # G: CPC €
+        f"=IFERROR(SUM({B})/SUM({C})*1000,0)",            # H: CPM €
+        f"=SUM({I_})",                                     # I: Нових підписників
+        f"=IFERROR(SUM({B})/SUM({I_}),0)",                # J: Вартість підписника
+        f"=IFERROR(SUM({I_})/SUM({E})*100,0)",            # K: Конверсія
+        "",                                                # L: Підписники всього (не агрегується)
+    ]
+
+    ws.update(f"A{r_summary}", [summary_row])
+
+    # Форматування рядка "За місяць" — жирний, фон як заголовок
+    try:
+        ws.format(f"A{r_summary}:L{r_summary}", {
+            "textFormat": {"bold": True},
+            "backgroundColor": {"red": 0.85, "green": 0.92, "blue": 0.85},
+        })
+    except Exception:
+        pass
+
+    logger.info(f"Skeleton {ws.title}: кістяк {month_prefix} готовий (рядки {r_first}–{r_last}), За місяць → рядок {r_summary}")
 
 
 def _sync_funnel_sheets(spreadsheet, label: str, traffic_today: dict, subs: dict,
