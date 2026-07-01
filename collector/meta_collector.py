@@ -11,6 +11,7 @@ from facebook_business.api import FacebookAdsApi
 from facebook_business.adobjects.business import Business
 from facebook_business.adobjects.adaccount import AdAccount
 from facebook_business.adobjects.campaign import Campaign
+from facebook_business.adobjects.ad import Ad
 
 from storage.database import upsert_campaign, upsert_daily_metrics, upsert_ad_metrics, init_db
 
@@ -200,6 +201,30 @@ def fetch_campaigns_for_account(account_id: str) -> list[dict]:
     return result
 
 
+def _fetch_ad_thumbnails(ad_ids: list[str]) -> dict[str, str]:
+    """
+    Batch-fetch thumbnail URLs for a list of ad IDs.
+    Returns {ad_id: thumbnail_url}. Silently skips failures.
+    """
+    result = {}
+    for ad_id in ad_ids:
+        try:
+            ad = Ad(ad_id)
+            ad.remote_read(fields=["creative"])
+            creative_id = ad.get("creative", {}).get("id")
+            if not creative_id:
+                continue
+            from facebook_business.adobjects.adcreative import AdCreative
+            creative = AdCreative(creative_id)
+            creative.remote_read(fields=["thumbnail_url", "image_url"])
+            url = creative.get("thumbnail_url") or creative.get("image_url") or ""
+            if url:
+                result[ad_id] = url
+        except Exception:
+            pass
+    return result
+
+
 def fetch_ad_insights_for_account(account_id: str, date_from: date, date_to: date) -> int:
     """Fetch ad-level insights (one row per ad per day) for creative-level reporting."""
     account_id = account_id.lstrip("act_")
@@ -217,7 +242,7 @@ def fetch_ad_insights_for_account(account_id: str, date_from: date, date_to: dat
     }
 
     insights = account.get_insights(params=params)
-    count = 0
+    rows_parsed = []
     for row in insights:
         d = dict(row)
         parsed = _parse_insight_row(d)
@@ -225,9 +250,19 @@ def fetch_ad_insights_for_account(account_id: str, date_from: date, date_to: dat
         parsed["ad_name"] = d.get("ad_name", "")
         parsed["adset_id"] = d.get("adset_id", "")
         parsed["adset_name"] = d.get("adset_name", "")
+        parsed["thumbnail_url"] = ""
+        rows_parsed.append(parsed)
+
+    # Fetch thumbnails for unique ad IDs
+    unique_ad_ids = list({r["ad_id"] for r in rows_parsed if r["ad_id"]})
+    thumbnails = _fetch_ad_thumbnails(unique_ad_ids)
+    logger.info(f"  Thumbnails fetched: {len(thumbnails)}/{len(unique_ad_ids)}")
+
+    for parsed in rows_parsed:
+        parsed["thumbnail_url"] = thumbnails.get(parsed["ad_id"], "")
         upsert_ad_metrics(parsed)
-        count += 1
-    return count
+
+    return len(rows_parsed)
 
 
 def fetch_insights_for_account(account_id: str, date_from: date, date_to: date) -> int:

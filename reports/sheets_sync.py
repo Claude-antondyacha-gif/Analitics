@@ -983,7 +983,7 @@ def _sync_sheet(gc, sheet_id: str, label: str, days: int = 30):
 
 
 CREATIVES_HEADERS = [
-    "Дата", "Кампанія", "Група оголошень", "Креатив",
+    "Дата", "Превʼю", "Креатив", "Кампанія", "Група оголошень",
     "Витрати ($)", "Ліди", "CPL ($)",
     "Покази", "Кліки", "CTR (%)",
 ]
@@ -1011,6 +1011,7 @@ def sync_creatives_sheet(spreadsheet, label: str, days: int = 90):
             existing_keys.add((row[0], row[3]))  # (date, ad_name)
 
     new_rows = []
+    image_cells = []  # (row_index, url) for IMAGE formula insertion
     for ad in ads:
         d = ad.get("date", "")
         ad_name = ad.get("ad_name", "")
@@ -1019,11 +1020,13 @@ def sync_creatives_sheet(spreadsheet, label: str, days: int = 90):
         spend = round(ad.get("spend") or 0, 2)
         leads = ad.get("leads") or 0
         cpl = round(spend / leads, 2) if leads > 0 else 0
+        thumbnail_url = ad.get("thumbnail_url") or ""
         new_rows.append([
             d,
+            "",           # Preview — IMAGE formula inserted separately
+            ad_name,
             ad.get("campaign_name", ""),
             ad.get("adset_name", ""),
-            ad_name,
             spend,
             leads,
             cpl,
@@ -1031,6 +1034,8 @@ def sync_creatives_sheet(spreadsheet, label: str, days: int = 90):
             ad.get("clicks") or 0,
             round(ad.get("ctr") or 0, 2),
         ])
+        if thumbnail_url:
+            image_cells.append((len(new_rows), thumbnail_url))
 
     if not new_rows and existing:
         logger.info(f"Sheet '{label}' Креативи (авто): no new rows to add")
@@ -1038,10 +1043,9 @@ def sync_creatives_sheet(spreadsheet, label: str, days: int = 90):
 
     # First run: write headers + all rows; subsequent runs: append new rows only
     if not existing or existing[0] != CREATIVES_HEADERS:
-        # (Re-)initialize with headers
-        all_rows = [CREATIVES_HEADERS] + new_rows
         ws.clear()
-        ws.update("A1", all_rows)
+        ws.update("A1", [CREATIVES_HEADERS] + new_rows)
+        first_data_row = 2
         try:
             ws.format(f"A1:{chr(64+len(CREATIVES_HEADERS))}1", {
                 "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
@@ -1051,10 +1055,39 @@ def sync_creatives_sheet(spreadsheet, label: str, days: int = 90):
             pass
         logger.info(f"Sheet '{label}' Креативи (авто): ініціалізовано з {len(new_rows)} рядками")
     else:
-        # Append new rows after the last existing row
-        next_row = len(existing) + 1
-        ws.update(f"A{next_row}", new_rows)
+        first_data_row = len(existing) + 1
+        ws.update(f"A{first_data_row}", new_rows)
         logger.info(f"Sheet '{label}' Креативи (авто): додано {len(new_rows)} нових рядків")
+
+    # Insert IMAGE formulas for thumbnails
+    for row_offset, url in image_cells:
+        sheet_row = first_data_row + row_offset - 1
+        try:
+            ws.update(
+                f"B{sheet_row}",
+                [[f'=IMAGE("{url}",1)']],
+                value_input_option="USER_ENTERED"
+            )
+        except Exception:
+            pass
+
+    # Set row height to 80px for image rows
+    if image_cells and new_rows:
+        try:
+            spreadsheet = ws.spreadsheet
+            spreadsheet.batch_update({"requests": [{
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": ws.id, "dimension": "ROWS",
+                        "startIndex": first_data_row - 1,
+                        "endIndex": first_data_row - 1 + len(new_rows),
+                    },
+                    "properties": {"pixelSize": 80},
+                    "fields": "pixelSize",
+                }
+            }]})
+        except Exception:
+            pass
 
 
 def sync_to_sheets(days: int = 30):

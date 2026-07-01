@@ -113,6 +113,7 @@ def init_db():
             leads INTEGER DEFAULT 0,
             link_clicks INTEGER DEFAULT 0,
             cost_per_lead REAL DEFAULT 0,
+            thumbnail_url TEXT DEFAULT '',
             UNIQUE(date, ad_id)
         );
 
@@ -197,18 +198,19 @@ def upsert_ad_metrics(row: dict):
         INSERT INTO daily_ad_metrics (
             date, ad_id, ad_name, adset_id, adset_name, campaign_id, campaign_name,
             impressions, clicks, spend, reach, ctr, cpc, cpm,
-            leads, link_clicks, cost_per_lead
+            leads, link_clicks, cost_per_lead, thumbnail_url
         ) VALUES (
             :date, :ad_id, :ad_name, :adset_id, :adset_name, :campaign_id, :campaign_name,
             :impressions, :clicks, :spend, :reach, :ctr, :cpc, :cpm,
-            :leads, :link_clicks, :cost_per_lead
+            :leads, :link_clicks, :cost_per_lead, :thumbnail_url
         )
         ON CONFLICT(date, ad_id) DO UPDATE SET
             impressions=excluded.impressions, clicks=excluded.clicks,
             spend=excluded.spend, reach=excluded.reach,
             ctr=excluded.ctr, cpc=excluded.cpc, cpm=excluded.cpm,
             leads=excluded.leads, link_clicks=excluded.link_clicks,
-            cost_per_lead=excluded.cost_per_lead
+            cost_per_lead=excluded.cost_per_lead,
+            thumbnail_url=COALESCE(NULLIF(excluded.thumbnail_url,''), daily_ad_metrics.thumbnail_url)
     """, {
         "date": row.get("date"),
         "ad_id": row.get("ad_id", ""),
@@ -227,6 +229,7 @@ def upsert_ad_metrics(row: dict):
         "leads": row.get("leads", 0),
         "link_clicks": row.get("link_clicks", 0),
         "cost_per_lead": row.get("cost_per_lead", 0),
+        "thumbnail_url": row.get("thumbnail_url", ""),
     })
     conn.commit()
     conn.close()
@@ -257,6 +260,7 @@ def get_ad_metrics_by_period(days: int = 30, only_leadgen: bool = True) -> list[
             a.cpc,
             a.cpm,
             a.cost_per_lead,
+            a.thumbnail_url,
             COALESCE(c.objective, '') as campaign_objective
         FROM daily_ad_metrics a
         LEFT JOIN campaigns c ON a.campaign_id = c.id
