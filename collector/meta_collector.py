@@ -17,7 +17,7 @@ from storage.database import upsert_campaign, upsert_daily_metrics, init_db
 logger = logging.getLogger(__name__)
 
 INSIGHT_FIELDS = [
-    "campaign_id", "campaign_name", "adset_id", "adset_name",
+    "campaign_id", "campaign_name",
     "impressions", "clicks", "spend", "reach", "frequency",
     "ctr", "cpc", "cpm", "cpp",
     "actions", "action_values", "cost_per_action_type",
@@ -155,7 +155,7 @@ def _parse_insight_row(row: dict) -> dict:
         "date": row.get("date_start"),
         "campaign_id": row.get("campaign_id", ""),
         "campaign_name": row.get("campaign_name", ""),
-        "adset_id": row.get("adset_id", ""),
+        "adset_id": row.get("adset_id", "campaign_level"),
         "adset_name": row.get("adset_name", ""),
         "impressions": int(row.get("impressions", 0) or 0),
         "clicks": int(row.get("clicks", 0) or 0),
@@ -197,7 +197,7 @@ def fetch_insights_for_account(account_id: str, date_from: date, date_to: date) 
     account = AdAccount(f"act_{account_id}")
 
     params = {
-        "level": "adset",
+        "level": "campaign",
         "time_range": {
             "since": date_from.isoformat(),
             "until": date_to.isoformat(),

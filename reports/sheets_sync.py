@@ -194,7 +194,7 @@ def _build_funnel_row(date_iso: str, stats: dict,
     """Будує один рядок для воронкового листа."""
     spend = sum(s["spend"] for s in stats.values())
     impressions = sum(s["impressions"] for s in stats.values())
-    reach = max((s["reach"] for s in stats.values()), default=0)
+    reach = sum(s["reach"] for s in stats.values())
     clicks = sum(s["clicks"] for s in stats.values())
     all_ctrs = [c for s in stats.values() for c in s["ctrs"]]
     all_cpcs = [c for s in stats.values() for c in s["cpcs"]]
@@ -598,7 +598,7 @@ def _fill_traffic_report_sheet(spreadsheet, sheet_name: str,
     # Aggregate traffic metrics
     total_spend = sum(s["spend"] for s in traffic_stats.values())
     total_impressions = sum(s["impressions"] for s in traffic_stats.values())
-    total_reach = max((s["reach"] for s in traffic_stats.values()), default=0)
+    total_reach = sum(s["reach"] for s in traffic_stats.values())
     total_clicks = sum(s["clicks"] for s in traffic_stats.values())
 
     all_ctrs = [c for s in traffic_stats.values() for c in s["ctrs"]]
