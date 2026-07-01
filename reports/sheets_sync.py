@@ -176,17 +176,14 @@ def _build_campaign_rows(stats: dict, today: str) -> list:
 
 
 FUNNEL_HEADERS = [
-    "Дата", "Витрати ($)", "Покази", "Охоплення", "Кліки",
-    "CTR (%)", "CPC ($)", "CPM ($)", "Підписники всього",
-    "Нових підписників", "Вартість підписника ($)", "Конверсія клік→підписник (%)",
+    "Дата", "Витрати (€)", "Покази", "Охоплення", "Кліки",
+    "CTR (%)", "CPC (€)", "CPM (€)", "Нових підписників",
+    "Вартість підписника (€)", "Конверсія клік→підписник", "Підписники всього",
 ]
 
-
-MONTHLY_SUMMARY_HEADERS = [
-    "Місяць", "Витрати ($)", "Покази", "Охоплення", "Кліки",
-    "CTR (%)", "CPC ($)", "CPM ($)", "Підписників приросло",
-    "Вартість підписника ($)", "Конверсія клік→підписник (%)",
-]
+# Індекси колонок у FUNNEL_HEADERS (для зручності читання)
+_F_DATE, _F_SPEND, _F_IMP, _F_REACH, _F_CLICKS = 0, 1, 2, 3, 4
+_F_CTR, _F_CPC, _F_CPM, _F_NEW_SUBS, _F_CPP, _F_CONV, _F_TOTAL_SUBS = 5, 6, 7, 8, 9, 10, 11
 
 
 def _build_funnel_row(date_iso: str, stats: dict,
@@ -208,83 +205,91 @@ def _build_funnel_row(date_iso: str, stats: dict,
     conversion = round(new_subs / clicks * 100, 2) if new_subs and clicks > 0 else ""
 
     return [
-        date_iso,
-        round(spend, 2),
-        impressions,
-        reach,
-        clicks,
-        _avg(all_ctrs),
-        _avg(all_cpcs),
-        _avg(all_cpms),
-        channel_total,
-        new_subs,
-        cost_per_sub,
-        conversion,
+        date_iso,           # A: Дата
+        round(spend, 2),    # B: Витрати (€)
+        impressions,        # C: Покази
+        reach,              # D: Охоплення
+        clicks,             # E: Кліки
+        _avg(all_ctrs),     # F: CTR (%)
+        _avg(all_cpcs),     # G: CPC (€)
+        _avg(all_cpms),     # H: CPM (€)
+        new_subs,           # I: Нових підписників
+        cost_per_sub,       # J: Вартість підписника (€)
+        conversion,         # K: Конверсія клік→підписник
+        channel_total,      # L: Підписники всього
     ]
 
 
 def _build_monthly_summary_rows(data_rows: list) -> list:
     """
-    Приймає список рядків (без заголовку), повертає рядки місячної зведки.
-    data_rows: кожен рядок відповідає FUNNEL_HEADERS.
+    Повертає рядки місячної зведки у форматі FUNNEL_HEADERS.
+    Колонка A: "За місяць" (або назва місяця якщо місяців > 1).
     """
     monthly = {}
     for row in data_rows:
-        if not row or len(row) < 10:
+        if not row or len(row) < 8:
             continue
-        d = row[0]  # YYYY-MM-DD
-        if len(d) < 7:
+        d = str(row[_F_DATE])
+        if not re.match(r'\d{4}-\d{2}', d):
             continue
-        month_key = d[:7]  # YYYY-MM
+        month_key = d[:7]
         if month_key not in monthly:
             monthly[month_key] = {
                 "spend": 0, "impressions": 0, "reach": 0, "clicks": 0,
-                "ctrs": [], "cpcs": [], "cpms": [],
-                "new_subs": 0,
+                "ctrs": [], "cpcs": [], "cpms": [], "new_subs": 0,
             }
         m = monthly[month_key]
-        try: m["spend"] += float(row[1]) if row[1] != "" else 0
-        except: pass
-        try: m["impressions"] += int(row[2]) if row[2] != "" else 0
-        except: pass
-        try: m["reach"] = max(m["reach"], int(row[3])) if row[3] != "" else m["reach"]
-        except: pass
-        try: m["clicks"] += int(row[4]) if row[4] != "" else 0
-        except: pass
-        try:
-            if row[5] != "": m["ctrs"].append(float(row[5]))
-        except: pass
-        try:
-            if row[6] != "": m["cpcs"].append(float(row[6]))
-        except: pass
-        try:
-            if row[7] != "": m["cpms"].append(float(row[7]))
-        except: pass
-        try: m["new_subs"] += int(row[9]) if row[9] not in ("", None) else 0
-        except: pass
+        def _safe_add(m, key, val, cast=float):
+            try: m[key] += cast(val) if val not in ("", None) else 0
+            except: pass
+        def _safe_max(m, key, val, cast=int):
+            try: m[key] = max(m[key], cast(val)) if val not in ("", None) else m[key]
+            except: pass
+        def _safe_list(lst, val, cast=float):
+            try:
+                if val not in ("", None): lst.append(cast(val))
+            except: pass
+        _safe_add(m, "spend", row[_F_SPEND])
+        _safe_add(m, "impressions", row[_F_IMP], int)
+        _safe_max(m, "reach", row[_F_REACH])
+        _safe_add(m, "clicks", row[_F_CLICKS], int)
+        _safe_list(m["ctrs"], row[_F_CTR])
+        _safe_list(m["cpcs"], row[_F_CPC])
+        _safe_list(m["cpms"], row[_F_CPM])
+        _safe_add(m, "new_subs", row[_F_NEW_SUBS], int)
 
     result = []
-    for month_key in sorted(monthly):
-        y, mo = month_key.split("-")
-        month_label = f"{calendar.month_name[int(mo)]} {y}"
+    months = sorted(monthly)
+    for month_key in months:
         m = monthly[month_key]
+        # Якщо один місяць — підпис "За місяць", інакше — назва місяця
+        if len(months) == 1:
+            label = "За місяць"
+        else:
+            y, mo = month_key.split("-")
+            ua_months = ["", "Січень", "Лютий", "Березень", "Квітень", "Травень",
+                         "Червень", "Липень", "Серпень", "Вересень", "Жовтень",
+                         "Листопад", "Грудень"]
+            label = f"{ua_months[int(mo)]} {y}"
+
         spend = round(m["spend"], 2)
         new_subs = m["new_subs"]
         clicks = m["clicks"]
         cost_per_sub = round(spend / new_subs, 2) if new_subs and spend > 0 else ""
         conversion = round(new_subs / clicks * 100, 2) if new_subs and clicks > 0 else ""
         result.append([
-            f"📊 {month_label}",
-            spend,
-            m["impressions"],
-            m["reach"],
-            clicks,
-            _avg(m["ctrs"]),
-            _avg(m["cpcs"]),
-            _avg(m["cpms"]),
-            new_subs,
-            cost_per_sub,
-            conversion,
+            label,          # A: За місяць / назва місяця
+            spend,          # B: Витрати (€)
+            m["impressions"],# C: Покази
+            m["reach"],     # D: Охоплення
+            clicks,         # E: Кліки
+            _avg(m["ctrs"]),# F: CTR (%)
+            _avg(m["cpcs"]),# G: CPC (€)
+            _avg(m["cpms"]),# H: CPM (€)
+            new_subs,       # I: Нових підписників
+            cost_per_sub,   # J: Вартість підписника (€)
+            conversion,     # K: Конверсія клік→підписник
+            "",             # L: Підписники всього (не агрегується)
         ])
     return result
 
@@ -370,7 +375,7 @@ def _backfill_funnel_sheet(spreadsheet, sheet_title: str,
     monthly_rows = _build_monthly_summary_rows(all_data_rows)
 
     ws.clear()
-    ws.update("A1", [FUNNEL_HEADERS] + all_data_rows + [[]] + [MONTHLY_SUMMARY_HEADERS] + monthly_rows)
+    ws.update("A1", [FUNNEL_HEADERS] + all_data_rows + [[]] + monthly_rows)
     logger.info(f"Бекфіл {sheet_title}: додано {len(new_rows)} рядків, місяців: {len(monthly_rows)}")
 
 
@@ -398,7 +403,7 @@ def _write_funnel_today(ws, sheet_title: str, stats: dict,
     monthly_rows = _build_monthly_summary_rows(all_data)
 
     ws.clear()
-    ws.update("A1", [FUNNEL_HEADERS] + all_data + [[]] + [MONTHLY_SUMMARY_HEADERS] + monthly_rows)
+    ws.update("A1", [FUNNEL_HEADERS] + all_data + [[]] + monthly_rows)
 
 
 def _sync_funnel_sheets(spreadsheet, label: str, traffic_today: dict, subs: dict,
@@ -533,7 +538,7 @@ def _backfill_all_traffic(spreadsheet, sheet_title: str,
     monthly_rows = _build_monthly_summary_rows(all_data)
 
     ws.clear()
-    ws.update("A1", [FUNNEL_HEADERS] + all_data + [[]] + [MONTHLY_SUMMARY_HEADERS] + monthly_rows)
+    ws.update("A1", [FUNNEL_HEADERS] + all_data + [[]] + monthly_rows)
     logger.info(f"Бекфіл {sheet_title}: {len(new_rows)} нових рядків")
 
 
