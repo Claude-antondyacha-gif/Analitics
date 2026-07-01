@@ -17,6 +17,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 logger = logging.getLogger(__name__)
 
+# Ensure DB tables exist (empty on first run; data arrives after /sync)
+try:
+    from storage.database import init_db
+    init_db()
+except Exception as _e:
+    logger.warning(f"DB init skipped: {_e}")
+
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED_CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID", "0"))
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
@@ -161,10 +168,22 @@ def _fmt_num(val) -> str:
     return f"{int(val):,}".replace(",", " ")
 
 
+_NO_DATA_MSG = (
+    "📭 <b>Дані ще не зібрані</b>\n\n"
+    "База порожня — потрібно спочатку запустити збір:\n"
+    "→ надішли /sync\n\n"
+    "Після першого синку всі команди запрацюють."
+)
+
+
 def build_leads_report() -> str:
     """Лідген: поточний тиждень і минулий."""
     try:
         from storage.database import get_metrics_by_period
+        rows_check = get_metrics_by_period(days=1)
+        # rows_check is empty list when table exists but no data yet
+        has_any = False
+
         lines = [f"🎯 <b>Лідогенерація — Sfero</b>"]
         lines.append(f"📅 {date.today().strftime('%d.%m.%Y')}\n")
 
@@ -172,6 +191,7 @@ def build_leads_report() -> str:
             rows = get_metrics_by_period(days=days)
             spend, leads, impressions, link_clicks = 0.0, 0, 0, 0
             for r in rows:
+                has_any = True
                 obj = (r.get("campaign_objective") or "").upper()
                 name = (r.get("campaign_name") or "")
                 if obj != "OUTCOME_LEADS":
@@ -187,8 +207,13 @@ def build_leads_report() -> str:
             lines.append(f"  💰 Витрати: <b>{_fmt_money(spend)}</b>")
             lines.append(f"  🎯 Ліди: <b>{leads}</b>  |  CPL: <b>{_fmt_money(cpl)}</b>")
             lines.append(f"  👁 Покази: <b>{_fmt_num(impressions)}</b>  |  🖱 Кліки: <b>{_fmt_num(link_clicks)}</b>\n")
+
+        if not has_any:
+            return _NO_DATA_MSG
         return "\n".join(lines)
     except Exception as e:
+        if "no such table" in str(e):
+            return _NO_DATA_MSG
         return f"❌ Помилка: {e}"
 
 
@@ -205,12 +230,14 @@ def build_traffic_report() -> str:
             "ChatBot": "chatbot",
         }
 
+        has_any = False
         for days_label, days in [("7 днів", 7), ("30 днів", 30)]:
             rows = get_metrics_by_period(days=days)
             channel_stats: dict = {k: {"spend": 0.0, "clicks": 0, "impressions": 0} for k in channels}
             other = {"spend": 0.0, "clicks": 0, "impressions": 0}
 
             for r in rows:
+                has_any = True
                 obj = (r.get("campaign_objective") or "").upper()
                 name = (r.get("campaign_name") or "").lower()
                 if obj != "OUTCOME_TRAFFIC":
@@ -236,15 +263,21 @@ def build_traffic_report() -> str:
                 lines.append(f"  ▸ Інше: {_fmt_money(other['spend'])}")
             lines.append("")
 
+        if not has_any:
+            return _NO_DATA_MSG
         return "\n".join(lines)
     except Exception as e:
+        if "no such table" in str(e):
+            return _NO_DATA_MSG
         return f"❌ Помилка: {e}"
 
 
 def build_week_report() -> str:
     """Тижневий зведений звіт."""
     try:
-        from storage.database import get_aggregated_metrics
+        from storage.database import get_aggregated_metrics, get_metrics_by_period
+        if not get_metrics_by_period(days=7):
+            return _NO_DATA_MSG
         lines = [f"📊 <b>Тижневий звіт — Sfero</b>"]
         lines.append(f"📅 {date.today().strftime('%d.%m.%Y')}\n")
 
@@ -282,6 +315,8 @@ def build_week_report() -> str:
 
         return "\n".join(lines)
     except Exception as e:
+        if "no such table" in str(e):
+            return _NO_DATA_MSG
         return f"❌ Помилка: {e}"
 
 
@@ -371,7 +406,7 @@ def get_db_context_for_ai() -> str:
             parts.append(
                 f"{label}: витрати=${spend:.2f}, ліди={leads}, CPL=${cpl:.2f}, CTR={ctr:.2f}%"
             )
-        return "\n".join(parts)
+        return "\n".join(parts) if parts else ""
     except Exception:
         return ""
 
