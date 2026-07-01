@@ -278,7 +278,7 @@ def get_ad_metrics_by_period(days: int = 30, only_leadgen: bool = True) -> list[
             )
         """
 
-    query += " ORDER BY a.date DESC, a.spend DESC"
+    query += " ORDER BY a.date ASC, a.spend DESC"
     rows = conn.execute(query, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]

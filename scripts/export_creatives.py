@@ -39,6 +39,7 @@ HEADERS = [
     "Витрати ($)", "Ліди", "CPL ($)",
     "Покази", "Кліки", "CTR (%)", "CPM ($)",
 ]
+# Note: headers are already in Ukrainian
 
 
 # ── Step 1: Fetch from Meta API ───────────────────────────────────────────────
@@ -111,7 +112,7 @@ def load_from_db(date_from: date, date_to: date) -> list[dict]:
             OR LOWER(a.campaign_name) LIKE '%lead%'
             OR LOWER(a.campaign_name) LIKE '%конверс%'
           )
-        ORDER BY a.date DESC, a.spend DESC
+        ORDER BY a.date ASC, a.spend DESC
     """
     rows = conn.execute(query, {
         "date_from": date_from.isoformat(),
