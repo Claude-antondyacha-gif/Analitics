@@ -60,32 +60,42 @@ def send_typing(chat_id: int):
 
 # ── GitHub helpers ───────────────────────────────────────────────────────────
 
-GITHUB_WORKFLOW_ID = os.environ.get("GITHUB_WORKFLOW_ID", "304657737")
+def trigger_sync_local() -> tuple[bool, str]:
+    """Run data collection directly on Railway (no GitHub needed)."""
+    import threading
+
+    def _run():
+        try:
+            from storage.database import init_db
+            init_db()
+            from collector.meta_collector import run_daily_collection
+            run_daily_collection()
+        except Exception as e:
+            logger.error(f"Sync error: {e}", exc_info=True)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return True, ""
 
 
 def trigger_github_sync() -> tuple[bool, str]:
-    """Returns (success, error_message)."""
+    """Try GitHub Actions dispatch; fall back to local run."""
     if not GITHUB_TOKEN:
-        return False, "Змінна GITHUB_PAT не встановлена в Railway"
+        return trigger_sync_local()
     headers = {
         "Authorization": f"token {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json",
     }
-    # Try by numeric ID first (more reliable), fallback to filename
-    for workflow_ref in [GITHUB_WORKFLOW_ID, "daily_collect.yml"]:
+    for workflow_ref in ["304657737", "daily_collect.yml"]:
         url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{workflow_ref}/dispatches"
         try:
             resp = requests.post(url, headers=headers, json={"ref": "main"}, timeout=15)
             if resp.status_code == 204:
                 return True, ""
-            try:
-                detail = resp.json().get("message", resp.text[:200])
-            except Exception:
-                detail = resp.text[:200]
-            last_error = f"GitHub API: {resp.status_code} — {detail} (workflow: {workflow_ref})"
-        except Exception as e:
-            last_error = str(e)
-    return False, last_error
+        except Exception:
+            pass
+    # GitHub failed → run locally
+    return trigger_sync_local()
 
 
 def get_last_workflow_status() -> str:
@@ -500,12 +510,15 @@ def handle_update(update: dict):
 
     # /sync
     if text == "/sync":
-        send_message(chat_id, "⏳ Запускаю синк...")
+        send_message(chat_id, "⏳ Запускаю збір даних з Meta API...")
         ok, err = trigger_github_sync()
         if ok:
-            send_message(chat_id, "✅ GitHub Actions запущено!\nДані оновляться за ~5 хвилин.")
+            send_message(chat_id,
+                "✅ Збір даних запущено!\n\n"
+                "Зачекай 2-3 хвилини, потім спробуй /leads або /week"
+            )
         else:
-            send_message(chat_id, f"❌ Не вдалося запустити\n\n<code>{err}</code>")
+            send_message(chat_id, f"❌ Помилка запуску\n\n<code>{err}</code>")
         return
 
     # /status
