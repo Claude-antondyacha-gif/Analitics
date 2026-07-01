@@ -18,7 +18,7 @@ import calendar
 import gspread
 from google.oauth2.service_account import Credentials
 
-from storage.database import get_metrics_by_period, get_aggregated_metrics, get_metrics_by_date
+from storage.database import get_metrics_by_period, get_aggregated_metrics, get_metrics_by_date, get_ad_metrics_summary
 
 logger = logging.getLogger(__name__)
 
@@ -945,6 +945,9 @@ def _sync_sheet(gc, sheet_id: str, label: str, days: int = 30):
         _upsert_rows(ws_leadgen, CAMPAIGN_HEADERS, leadgen_rows)
         logger.info(f"Sheet '{label}' Лідген: {len(leadgen_rows)} рядків за {today}")
 
+    # ── Креативи (авто) — leadgen ad-level summary ──────────────────
+    sync_creatives_sheet(spreadsheet, label, days=30)
+
     # ── Лідген Липень / поточний місяць ─────────────────────────────
     yesterday = date.today() - timedelta(days=1)
     leadgen_monthly_title = _get_leadgen_monthly_sheet_title()
@@ -975,6 +978,51 @@ def _sync_sheet(gc, sheet_id: str, label: str, days: int = 30):
     ws_summary.clear()
     ws_summary.update("A1", [SUMMARY_HEADERS] + summary_rows)
     logger.info(f"Sheet '{label}' Підсумок оновлено")
+
+
+CREATIVES_HEADERS = [
+    "Оновлено", "Креатив", "Кампанія",
+    "Витрати ($)", "Ліди", "CPL ($)",
+    "Перший день", "Останній день", "Днів активності",
+]
+
+
+def sync_creatives_sheet(spreadsheet, label: str, days: int = 30):
+    """Write per-creative (ad-level) summary for leadgen campaigns to 'Креативи (авто)'."""
+    ads = get_ad_metrics_summary(days=days, only_leadgen=True)
+    if not ads:
+        logger.info(f"Sheet '{label}' Креативи: no ad-level data yet")
+        return
+
+    ws = _ensure_worksheet(spreadsheet, "Креативи (авто)")
+    now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+    rows = []
+    for i, ad in enumerate(ads):
+        rows.append([
+            now_str if i == 0 else "",
+            ad.get("ad_name", ""),
+            ad.get("campaign_name", ""),
+            round(ad.get("total_spend") or 0, 2),
+            ad.get("total_leads") or 0,
+            ad.get("cpl") or 0,
+            ad.get("first_date", ""),
+            ad.get("last_date", ""),
+            ad.get("active_days") or 0,
+        ])
+
+    ws.clear()
+    ws.update("A1", [CREATIVES_HEADERS] + rows)
+
+    # Header formatting
+    try:
+        ws.format(f"A1:{chr(64+len(CREATIVES_HEADERS))}1", {
+            "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+            "backgroundColor": {"red": 0.18, "green": 0.27, "blue": 0.6},
+        })
+    except Exception:
+        pass
+
+    logger.info(f"Sheet '{label}' Креативи (авто): {len(rows)} креативів оновлено")
 
 
 def sync_to_sheets(days: int = 30):

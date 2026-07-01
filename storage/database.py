@@ -94,9 +94,33 @@ def init_db():
             result TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS daily_ad_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            ad_id TEXT NOT NULL,
+            ad_name TEXT,
+            adset_id TEXT,
+            adset_name TEXT,
+            campaign_id TEXT,
+            campaign_name TEXT,
+            impressions INTEGER DEFAULT 0,
+            clicks INTEGER DEFAULT 0,
+            spend REAL DEFAULT 0,
+            reach INTEGER DEFAULT 0,
+            ctr REAL DEFAULT 0,
+            cpc REAL DEFAULT 0,
+            cpm REAL DEFAULT 0,
+            leads INTEGER DEFAULT 0,
+            link_clicks INTEGER DEFAULT 0,
+            cost_per_lead REAL DEFAULT 0,
+            UNIQUE(date, ad_id)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_daily_metrics_date ON daily_metrics(date);
         CREATE INDEX IF NOT EXISTS idx_daily_metrics_campaign ON daily_metrics(campaign_id);
         CREATE INDEX IF NOT EXISTS idx_recommendations_date ON ai_recommendations(created_at);
+        CREATE INDEX IF NOT EXISTS idx_ad_metrics_date ON daily_ad_metrics(date);
+        CREATE INDEX IF NOT EXISTS idx_ad_metrics_ad ON daily_ad_metrics(ad_id);
     """)
 
     conn.commit()
@@ -162,6 +186,93 @@ def get_metrics_by_date(date_iso: str) -> list[dict]:
         "SELECT * FROM daily_metrics WHERE date = ? ORDER BY campaign_name",
         (date_iso,)
     ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def upsert_ad_metrics(row: dict):
+    """Insert or update daily ad-level metrics (one row per ad per day)."""
+    conn = get_connection()
+    conn.execute("""
+        INSERT INTO daily_ad_metrics (
+            date, ad_id, ad_name, adset_id, adset_name, campaign_id, campaign_name,
+            impressions, clicks, spend, reach, ctr, cpc, cpm,
+            leads, link_clicks, cost_per_lead
+        ) VALUES (
+            :date, :ad_id, :ad_name, :adset_id, :adset_name, :campaign_id, :campaign_name,
+            :impressions, :clicks, :spend, :reach, :ctr, :cpc, :cpm,
+            :leads, :link_clicks, :cost_per_lead
+        )
+        ON CONFLICT(date, ad_id) DO UPDATE SET
+            impressions=excluded.impressions, clicks=excluded.clicks,
+            spend=excluded.spend, reach=excluded.reach,
+            ctr=excluded.ctr, cpc=excluded.cpc, cpm=excluded.cpm,
+            leads=excluded.leads, link_clicks=excluded.link_clicks,
+            cost_per_lead=excluded.cost_per_lead
+    """, {
+        "date": row.get("date"),
+        "ad_id": row.get("ad_id", ""),
+        "ad_name": row.get("ad_name", ""),
+        "adset_id": row.get("adset_id", ""),
+        "adset_name": row.get("adset_name", ""),
+        "campaign_id": row.get("campaign_id", ""),
+        "campaign_name": row.get("campaign_name", ""),
+        "impressions": row.get("impressions", 0),
+        "clicks": row.get("clicks", 0),
+        "spend": row.get("spend", 0),
+        "reach": row.get("reach", 0),
+        "ctr": row.get("ctr", 0),
+        "cpc": row.get("cpc", 0),
+        "cpm": row.get("cpm", 0),
+        "leads": row.get("leads", 0),
+        "link_clicks": row.get("link_clicks", 0),
+        "cost_per_lead": row.get("cost_per_lead", 0),
+    })
+    conn.commit()
+    conn.close()
+
+
+def get_ad_metrics_summary(days: int = 30, only_leadgen: bool = True) -> list[dict]:
+    """
+    Returns aggregated stats per ad (creative) for last N days.
+    Sorted by spend desc. If only_leadgen=True, filters SNAP OUTCOME_LEADS campaigns.
+    """
+    conn = get_connection()
+    query = """
+        SELECT
+            a.ad_id,
+            a.ad_name,
+            a.campaign_name,
+            MIN(a.date) as first_date,
+            MAX(a.date) as last_date,
+            COUNT(DISTINCT a.date) as active_days,
+            SUM(a.spend) as total_spend,
+            SUM(a.impressions) as total_impressions,
+            SUM(a.leads) as total_leads,
+            SUM(a.clicks) as total_clicks,
+            SUM(a.link_clicks) as total_link_clicks,
+            CASE WHEN SUM(a.leads) > 0
+                 THEN ROUND(SUM(a.spend) / SUM(a.leads), 2)
+                 ELSE 0 END as cpl,
+            CASE WHEN SUM(a.clicks) > 0
+                 THEN ROUND(SUM(a.impressions) * 1.0 / SUM(a.clicks), 2)
+                 ELSE 0 END as avg_ctr
+        FROM daily_ad_metrics a
+        LEFT JOIN campaigns c ON a.campaign_id = c.id
+        WHERE a.date >= date('now', :offset)
+    """
+    params: dict = {"offset": f"-{days} days"}
+
+    if only_leadgen:
+        query += """
+            AND (
+                c.objective = 'OUTCOME_LEADS'
+                OR LOWER(a.campaign_name) LIKE '%snap%'
+            )
+        """
+
+    query += " GROUP BY a.ad_id, a.ad_name ORDER BY total_spend DESC"
+    rows = conn.execute(query, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

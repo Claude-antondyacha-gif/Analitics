@@ -12,7 +12,7 @@ from facebook_business.adobjects.business import Business
 from facebook_business.adobjects.adaccount import AdAccount
 from facebook_business.adobjects.campaign import Campaign
 
-from storage.database import upsert_campaign, upsert_daily_metrics, init_db
+from storage.database import upsert_campaign, upsert_daily_metrics, upsert_ad_metrics, init_db
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,14 @@ INSIGHT_FIELDS = [
     "ctr", "cpc", "cpm", "cpp",
     "actions", "action_values", "cost_per_action_type",
     "video_30_sec_watched_actions", "post_engagement",
+    "date_start", "date_stop",
+]
+
+AD_INSIGHT_FIELDS = [
+    "campaign_id", "campaign_name", "adset_id", "adset_name", "ad_id", "ad_name",
+    "impressions", "clicks", "spend", "reach",
+    "ctr", "cpc", "cpm",
+    "actions", "action_values", "cost_per_action_type",
     "date_start", "date_stop",
 ]
 
@@ -192,6 +200,36 @@ def fetch_campaigns_for_account(account_id: str) -> list[dict]:
     return result
 
 
+def fetch_ad_insights_for_account(account_id: str, date_from: date, date_to: date) -> int:
+    """Fetch ad-level insights (one row per ad per day) for creative-level reporting."""
+    account_id = account_id.lstrip("act_")
+    account = AdAccount(f"act_{account_id}")
+
+    params = {
+        "level": "ad",
+        "time_range": {
+            "since": date_from.isoformat(),
+            "until": date_to.isoformat(),
+        },
+        "time_increment": 1,
+        "fields": AD_INSIGHT_FIELDS,
+        "limit": 500,
+    }
+
+    insights = account.get_insights(params=params)
+    count = 0
+    for row in insights:
+        d = dict(row)
+        parsed = _parse_insight_row(d)
+        parsed["ad_id"] = d.get("ad_id", "")
+        parsed["ad_name"] = d.get("ad_name", "")
+        parsed["adset_id"] = d.get("adset_id", "")
+        parsed["adset_name"] = d.get("adset_name", "")
+        upsert_ad_metrics(parsed)
+        count += 1
+    return count
+
+
 def fetch_insights_for_account(account_id: str, date_from: date, date_to: date) -> int:
     account_id = account_id.lstrip("act_")
     account = AdAccount(f"act_{account_id}")
@@ -237,7 +275,11 @@ def run_daily_collection() -> int:
             fetch_campaigns_for_account(acc_id)
             count = fetch_insights_for_account(acc_id, yesterday, yesterday)
             total += count
-            logger.info(f"  → {count} rows saved")
+            try:
+                fetch_ad_insights_for_account(acc_id, yesterday, yesterday)
+            except Exception as e_ad:
+                logger.warning(f"  → Ad-level insights failed (non-critical): {e_ad}")
+            logger.info(f"  → {count} campaign rows saved")
         except Exception as e:
             logger.error(f"  → Failed: {e}")
 
@@ -267,6 +309,10 @@ def run_historical_backfill(days: int = 30) -> int:
             fetch_campaigns_for_account(acc_id)
             count = fetch_insights_for_account(acc_id, date_from, date_to)
             total += count
+            try:
+                fetch_ad_insights_for_account(acc_id, date_from, date_to)
+            except Exception as e_ad:
+                logger.warning(f"  → Ad-level backfill failed (non-critical): {e_ad}")
             logger.info(f"  → {count} rows")
         except Exception as e:
             logger.error(f"  → Failed: {e}")
