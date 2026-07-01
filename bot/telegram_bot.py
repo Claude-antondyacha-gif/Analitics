@@ -465,6 +465,7 @@ HELP_TEXT = (
     "/week — тижневий порівняльний звіт\n"
     "/report — повний щоденний звіт\n"
     "/sync — запустити збір даних з Meta\n"
+    "/check — перевірити чи цифри в таблиці збігаються з Meta\n"
     "/status — статус останнього синку\n"
     "/stats — дані з Google Sheets\n"
     "/alert [число] — поріг CPL для алерту (напр. /alert 25)\n\n"
@@ -532,10 +533,29 @@ def handle_update(update: dict):
         if ok:
             send_message(chat_id,
                 "✅ Збір даних запущено!\n\n"
-                "Зачекай 2-3 хвилини, потім спробуй /leads або /week"
+                "Зачекай 2-3 хвилини, потім:\n"
+                "• /leads або /week — переглянути цифри\n"
+                "• /check — перевірити що таблиця заповнилась правильно"
             )
         else:
             send_message(chat_id, f"❌ Помилка запуску\n\n<code>{err}</code>")
+        return
+
+    if text == "/check":
+        send_typing(chat_id)
+        send_message(chat_id, "🔍 Перевіряю відповідність таблиці і Meta API...")
+        try:
+            from reports.verify_sync import run_verification
+            _, summary = run_verification(days_back=7)
+            send_message(chat_id, summary)
+        except Exception as e:
+            if "credentials" in str(e).lower() or "No such file" in str(e):
+                send_message(chat_id,
+                    "⚠️ Google Sheets не підключені в цьому середовищі.\n"
+                    "Для верифікації потрібен файл <code>credentials.json</code> на Railway."
+                )
+            else:
+                send_message(chat_id, f"❌ Помилка верифікації: {e}")
         return
 
     # /status

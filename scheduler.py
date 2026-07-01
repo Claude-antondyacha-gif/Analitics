@@ -59,7 +59,21 @@ def daily_job():
     except Exception as e:
         logger.warning(f"Sheets sync failed (non-critical): {e}")
 
-    # 4. Send Telegram report
+    # 4. Verify Sheets match DB
+    try:
+        from reports.verify_sync import run_verification
+        results, summary = run_verification(days_back=3)
+        errors = [r for r in results if not r.ok]
+        if errors:
+            logger.warning(f"Verify: {len(errors)} mismatches found")
+            from notifier.telegram_bot import send_message as tg_send
+            tg_send(f"🔍 <b>Авто-верифікація після синку</b>\n\n{summary}")
+        else:
+            logger.info(f"Verify: all {len(results)} checks passed")
+    except Exception as e:
+        logger.warning(f"Verify failed (non-critical): {e}")
+
+    # 5. Send Telegram report
     try:
         from notifier.telegram_bot import send_daily_report
         ok = send_daily_report()
