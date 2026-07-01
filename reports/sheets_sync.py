@@ -790,6 +790,105 @@ def _fill_traffic_report_sheet(spreadsheet, sheet_name: str,
     logger.info(f"Filled '{sheet_name}' row {target_row} ({today_iso}): spend=${total_spend:.2f}, reach={total_reach}, subs_new={new_subs}")
 
 
+def _get_snap_leadgen_stats(target_date: date) -> dict:
+    """
+    Returns aggregated stats for OUTCOME_LEADS + SNAP campaigns for target_date.
+    Uses get_metrics_by_period (joins campaigns table) so objective is available.
+    Keys: spend, leads, impressions, link_clicks
+    """
+    # days=2 to ensure target_date is included (date >= now - 2 days)
+    days_back = (date.today() - target_date).days + 1
+    rows = get_metrics_by_period(days=max(days_back, 1))
+    spend = 0.0
+    leads = 0
+    impressions = 0
+    link_clicks = 0
+    for r in rows:
+        if r.get("date") != target_date.isoformat():
+            continue
+        obj = (r.get("campaign_objective") or "").upper()
+        name = (r.get("campaign_name") or "")
+        # Filter: OUTCOME_LEADS objective AND "SNAP" in name (case-insensitive)
+        if obj != "OUTCOME_LEADS":
+            continue
+        if "snap" not in name.lower():
+            continue
+        spend += r.get("spend") or 0
+        leads += r.get("leads") or 0
+        impressions += r.get("impressions") or 0
+        link_clicks += r.get("link_clicks") or 0
+    return {
+        "spend": round(spend, 2),
+        "leads": leads,
+        "impressions": impressions,
+        "link_clicks": link_clicks,
+    }
+
+
+def _sync_leadgen_monthly_sheet(spreadsheet, sheet_title: str, target_date: date):
+    """
+    Fills columns B, C, D, E in the leadgen monthly sheet for target_date.
+    Finds the row by matching date (DD.MM.YYYY or YYYY-MM-DD format in col A).
+    NEVER touches columns F, G, H, I, J (user formulas) or L, M, N (manual).
+    Optionally writes a comment to K.
+
+    B = Бюджет (spend €)
+    C = К-сть лідів
+    D = Покази
+    E = Кліки по посиланню
+    """
+    try:
+        ws = spreadsheet.worksheet(sheet_title)
+    except gspread.WorksheetNotFound:
+        logger.warning(f"Sheet '{sheet_title}' not found — skipping")
+        return
+
+    stats = _get_snap_leadgen_stats(target_date)
+    if not stats["spend"] and not stats["leads"] and not stats["impressions"]:
+        logger.info(f"No SNAP leadgen data for {target_date.isoformat()} — skipping '{sheet_title}'")
+        return
+
+    # Build date variants to match against col A
+    date_iso = target_date.isoformat()
+    date_ddmmyyyy = target_date.strftime("%d.%m.%Y")    # 01.07.2026
+    date_dmyyyy = target_date.strftime("%-d.%-m.%Y")    # 1.7.2026
+
+    all_values = ws.get_all_values()
+    target_row = None
+    for i, row in enumerate(all_values):
+        if not row:
+            continue
+        cell = row[0].strip()
+        normalized = _normalize_date_cell(cell)
+        if normalized == date_iso or cell in (date_ddmmyyyy, date_dmyyyy):
+            target_row = i + 1  # 1-based
+            break
+
+    if target_row is None:
+        logger.warning(f"Date {date_iso} not found in '{sheet_title}' — cannot fill")
+        return
+
+    # Write only B, C, D, E — leave F-J (formulas), K (comments), L-N (manual) untouched
+    ws.update(
+        f"B{target_row}:E{target_row}",
+        [[stats["spend"], stats["leads"], stats["impressions"], stats["link_clicks"]]],
+        value_input_option="USER_ENTERED",
+    )
+    logger.info(
+        f"'{sheet_title}' row {target_row} ({date_iso}): "
+        f"spend={stats['spend']}, leads={stats['leads']}, "
+        f"imp={stats['impressions']}, link_clicks={stats['link_clicks']}"
+    )
+
+
+def _get_leadgen_monthly_sheet_title() -> str:
+    """Returns expected sheet title for the current month, e.g. 'Лідген Липень'."""
+    ua_months = ["", "Січень", "Лютий", "Березень", "Квітень", "Травень",
+                 "Червень", "Липень", "Серпень", "Вересень", "Жовтень",
+                 "Листопад", "Грудень"]
+    return f"Лідген {ua_months[date.today().month]}"
+
+
 def _sync_sheet(gc, sheet_id: str, label: str, days: int = 30):
     try:
         spreadsheet = gc.open_by_key(sheet_id)
@@ -845,6 +944,11 @@ def _sync_sheet(gc, sheet_id: str, label: str, days: int = 30):
     if leadgen_rows:
         _upsert_rows(ws_leadgen, CAMPAIGN_HEADERS, leadgen_rows)
         logger.info(f"Sheet '{label}' Лідген: {len(leadgen_rows)} рядків за {today}")
+
+    # ── Лідген Липень / поточний місяць ─────────────────────────────
+    yesterday = date.today() - timedelta(days=1)
+    leadgen_monthly_title = _get_leadgen_monthly_sheet_title()
+    _sync_leadgen_monthly_sheet(spreadsheet, leadgen_monthly_title, yesterday)
 
     # ── Підсумок (авто) ──────────────────────────────────────────────
     ws_summary = _get_or_create_with_headers(spreadsheet, "Підсумок (авто)", SUMMARY_HEADERS)
