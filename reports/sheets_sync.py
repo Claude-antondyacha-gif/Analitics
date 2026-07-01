@@ -18,7 +18,9 @@ import calendar
 import gspread
 from google.oauth2.service_account import Credentials
 
-from storage.database import get_metrics_by_period, get_aggregated_metrics, get_metrics_by_date, get_ad_metrics_summary
+from storage.database import (get_metrics_by_period, get_aggregated_metrics,
+                               get_metrics_by_date, get_ad_metrics_summary,
+                               get_ad_metrics_by_period)
 
 logger = logging.getLogger(__name__)
 
@@ -981,48 +983,78 @@ def _sync_sheet(gc, sheet_id: str, label: str, days: int = 30):
 
 
 CREATIVES_HEADERS = [
-    "Оновлено", "Креатив", "Кампанія",
+    "Дата", "Кампанія", "Група оголошень", "Креатив",
     "Витрати ($)", "Ліди", "CPL ($)",
-    "Перший день", "Останній день", "Днів активності",
+    "Покази", "Кліки", "CTR (%)",
 ]
 
 
-def sync_creatives_sheet(spreadsheet, label: str, days: int = 30):
-    """Write per-creative (ad-level) summary for leadgen campaigns to 'Креативи (авто)'."""
-    ads = get_ad_metrics_summary(days=days, only_leadgen=True)
+def sync_creatives_sheet(spreadsheet, label: str, days: int = 90):
+    """
+    Write daily ad-level rows for leadgen campaigns to 'Креативи (авто)'.
+    Each row = 1 creative × 1 day. New dates are appended; existing rows are not touched.
+    Sorted date desc, spend desc within each date.
+    """
+    ads = get_ad_metrics_by_period(days=days, only_leadgen=True)
     if not ads:
         logger.info(f"Sheet '{label}' Креативи: no ad-level data yet")
         return
 
     ws = _ensure_worksheet(spreadsheet, "Креативи (авто)")
-    now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-    rows = []
-    for i, ad in enumerate(ads):
-        rows.append([
-            now_str if i == 0 else "",
-            ad.get("ad_name", ""),
+    existing = ws.get_all_values()
+
+    # Build set of already-written (date, ad_id) keys from existing rows
+    # We store date in col A (index 0) and ad_name in col 3 — use date+creative name as key
+    existing_keys: set[tuple] = set()
+    for row in existing[1:]:
+        if row and len(row) >= 4 and row[0]:
+            existing_keys.add((row[0], row[3]))  # (date, ad_name)
+
+    new_rows = []
+    for ad in ads:
+        d = ad.get("date", "")
+        ad_name = ad.get("ad_name", "")
+        if (d, ad_name) in existing_keys:
+            continue
+        spend = round(ad.get("spend") or 0, 2)
+        leads = ad.get("leads") or 0
+        cpl = round(spend / leads, 2) if leads > 0 else 0
+        new_rows.append([
+            d,
             ad.get("campaign_name", ""),
-            round(ad.get("total_spend") or 0, 2),
-            ad.get("total_leads") or 0,
-            ad.get("cpl") or 0,
-            ad.get("first_date", ""),
-            ad.get("last_date", ""),
-            ad.get("active_days") or 0,
+            ad.get("adset_name", ""),
+            ad_name,
+            spend,
+            leads,
+            cpl,
+            ad.get("impressions") or 0,
+            ad.get("clicks") or 0,
+            round(ad.get("ctr") or 0, 2),
         ])
 
-    ws.clear()
-    ws.update("A1", [CREATIVES_HEADERS] + rows)
+    if not new_rows and existing:
+        logger.info(f"Sheet '{label}' Креативи (авто): no new rows to add")
+        return
 
-    # Header formatting
-    try:
-        ws.format(f"A1:{chr(64+len(CREATIVES_HEADERS))}1", {
-            "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
-            "backgroundColor": {"red": 0.18, "green": 0.27, "blue": 0.6},
-        })
-    except Exception:
-        pass
-
-    logger.info(f"Sheet '{label}' Креативи (авто): {len(rows)} креативів оновлено")
+    # First run: write headers + all rows; subsequent runs: append new rows only
+    if not existing or existing[0] != CREATIVES_HEADERS:
+        # (Re-)initialize with headers
+        all_rows = [CREATIVES_HEADERS] + new_rows
+        ws.clear()
+        ws.update("A1", all_rows)
+        try:
+            ws.format(f"A1:{chr(64+len(CREATIVES_HEADERS))}1", {
+                "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+                "backgroundColor": {"red": 0.18, "green": 0.27, "blue": 0.6},
+            })
+        except Exception:
+            pass
+        logger.info(f"Sheet '{label}' Креативи (авто): ініціалізовано з {len(new_rows)} рядками")
+    else:
+        # Append new rows after the last existing row
+        next_row = len(existing) + 1
+        ws.update(f"A{next_row}", new_rows)
+        logger.info(f"Sheet '{label}' Креативи (авто): додано {len(new_rows)} нових рядків")
 
 
 def sync_to_sheets(days: int = 30):

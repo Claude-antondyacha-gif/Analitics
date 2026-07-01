@@ -232,6 +232,52 @@ def upsert_ad_metrics(row: dict):
     conn.close()
 
 
+def get_ad_metrics_by_period(days: int = 30, only_leadgen: bool = True) -> list[dict]:
+    """
+    Returns daily ad-level rows (one row per ad per day) for last N days.
+    If only_leadgen=True, filters to OUTCOME_LEADS campaigns.
+    Sorted by date desc, then spend desc.
+    """
+    conn = get_connection()
+    query = """
+        SELECT
+            a.date,
+            a.ad_id,
+            a.ad_name,
+            a.adset_id,
+            a.adset_name,
+            a.campaign_id,
+            a.campaign_name,
+            a.spend,
+            a.impressions,
+            a.clicks,
+            a.leads,
+            a.link_clicks,
+            a.ctr,
+            a.cpc,
+            a.cpm,
+            a.cost_per_lead,
+            COALESCE(c.objective, '') as campaign_objective
+        FROM daily_ad_metrics a
+        LEFT JOIN campaigns c ON a.campaign_id = c.id
+        WHERE a.date >= date('now', :offset)
+    """
+    params: dict = {"offset": f"-{days} days"}
+
+    if only_leadgen:
+        query += """
+            AND (
+                c.objective = 'OUTCOME_LEADS'
+                OR LOWER(a.campaign_name) LIKE '%snap%'
+            )
+        """
+
+    query += " ORDER BY a.date DESC, a.spend DESC"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def get_ad_metrics_summary(days: int = 30, only_leadgen: bool = True) -> list[dict]:
     """
     Returns aggregated stats per ad (creative) for last N days.
