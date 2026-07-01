@@ -120,8 +120,31 @@ def build_daily_report() -> str:
             lines.append(f"  💸 ${s['spend']:.2f}  |  🎯 {s['leads']} лідів" + (f"  |  CPL ${cpl:.2f}" if cpl else ""))
             lines.append(f"  CTR {avg_ctr:.2f}%  |  Кліки {s['clicks']:,}")
 
+    # ── AI Analysis (latest recommendation) ───────────────────────
+    try:
+        from storage.database import get_latest_recommendations
+        recs = get_latest_recommendations(limit=1)
+        if recs:
+            r = recs[0]
+            lines.append("\n═══ AI АНАЛІЗ ═══")
+            lines.append(f"📝 {r['summary']}")
+
+            alerts = r.get("critical_alerts", [])
+            if alerts:
+                lines.append("\n🚨 <b>Критичні алерти:</b>")
+                for a in alerts[:3]:
+                    lines.append(f"  • {a}")
+
+            recommendations = r.get("recommendations", [])
+            if recommendations:
+                lines.append("\n💡 <b>Рекомендації:</b>")
+                for rec in recommendations[:4]:
+                    lines.append(f"  • {rec}")
+    except Exception:
+        pass
+
     lines.append("\n" + "─" * 30)
-    lines.append("🤖 Детальний аналіз: відкрий дашборд")
+    lines.append("🤖 Sfero Analytics Bot | автозвіт")
 
     return "\n".join(lines)
 
