@@ -626,8 +626,9 @@ def _backfill_all_traffic(spreadsheet, sheet_title: str,
 
     rows_by_date: dict[str, dict] = {}
     for r in all_rows:
-        if _classify_campaign(r["campaign_name"]) == "leadgen":
-            continue  # лідген не включаємо
+        # Включаємо тільки кампанії що належать до однієї з воронок (ютуб/канал/чатбот)
+        if _classify_funnel(r["campaign_name"]) is None:
+            continue
         d = r["date"]
         if d not in rows_by_date:
             rows_by_date[d] = {}
