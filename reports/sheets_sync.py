@@ -509,7 +509,7 @@ def _prepare_month_skeleton(ws, year: int, month: int):
         "",                                                # L: Підписники всього (не агрегується)
     ]
 
-    ws.update(f"A{r_summary}", [summary_row])
+    ws.update(f"A{r_summary}", [summary_row], value_input_option="USER_ENTERED")
 
     # Форматування рядка "За місяць" — жирний, фон як заголовок
     try:
