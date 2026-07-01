@@ -366,44 +366,67 @@ def _backfill_funnel_sheet(spreadsheet, sheet_title: str,
         logger.info(f"Бекфіл {sheet_title}: нових рядків немає")
         return
 
-    # Додаємо нові рядки (тільки рядки з датою YYYY-MM-DD, без зведки)
-    all_data_rows = [r for r in existing[1:] if r and r[0] and re.match(r'\d{4}-\d{2}-\d{2}', r[0])]
-    all_data_rows += new_rows
-    all_data_rows.sort(key=lambda r: r[0])
+    # Пишемо тільки нові рядки — кожен окремо в потрібний рядок аркуша
+    # Не чіпаємо існуючі рядки (включно з ручними правками та формулами "За місяць")
+    existing_dates = {r[0]: i + 1 for i, r in enumerate(existing) if r and r[0]}
+    # Знаходимо останній рядок з датою щоб знати куди вставляти нові
+    last_date_sheet_row = 1
+    for i, r in enumerate(existing):
+        if r and r[0] and re.match(r'\d{4}-\d{2}-\d{2}', r[0]):
+            last_date_sheet_row = i + 1
 
-    # Місячна зведка
-    monthly_rows = _build_monthly_summary_rows(all_data_rows)
+    appended = 0
+    for row in sorted(new_rows, key=lambda r: r[0]):
+        date_val = row[0]
+        if date_val in existing_dates:
+            # Рядок з цією датою вже є — не чіпаємо
+            continue
+        last_date_sheet_row += 1
+        ws.update(f"A{last_date_sheet_row}", [row])
+        existing_dates[date_val] = last_date_sheet_row
+        appended += 1
 
-    ws.clear()
-    ws.update("A1", [FUNNEL_HEADERS] + all_data_rows + [[]] + monthly_rows)
-    logger.info(f"Бекфіл {sheet_title}: додано {len(new_rows)} рядків, місяців: {len(monthly_rows)}")
+    logger.info(f"Бекфіл {sheet_title}: вставлено {appended} нових рядків (існуючі не змінено)")
 
 
 def _write_funnel_today(ws, sheet_title: str, stats: dict,
                         channel_total: int | str, existing: list):
-    """Оновлює або додає рядок за сьогодні у вже відкритому worksheet."""
+    """
+    Оновлює або додає рядок за сьогодні — без ws.clear().
+    Знаходить рядок за датою і пише тільки в нього.
+    "За місяць" рядок (з формулами) не чіпаємо.
+    """
     today = date.today().isoformat()
 
-    # Знаходимо попередній total з останнього рядка даних (не зведка, не порожній)
+    # Знаходимо попередній total з останнього рядка з датою (col L = індекс 11)
     data_rows = [r for r in existing[1:] if r and r[0] and re.match(r'\d{4}-\d{2}-\d{2}', r[0])]
     prev_rows = [r for r in data_rows if r[0] < today]
-
     prev_total = ""
     if prev_rows:
         try:
-            prev_total = int(prev_rows[-1][8])
+            prev_total = int(prev_rows[-1][_F_TOTAL_SUBS])
         except (ValueError, IndexError):
             prev_total = ""
 
     new_row = _build_funnel_row(today, stats, channel_total, prev_total)
 
-    # Всі рядки без сьогодні + сьогодні + порожній + зведка
-    other_rows = [r for r in data_rows if r[0] != today]
-    all_data = sorted(other_rows + [new_row], key=lambda r: r[0])
-    monthly_rows = _build_monthly_summary_rows(all_data)
+    # Шукаємо рядок з сьогоднішньою датою
+    target_row_idx = None
+    for i, r in enumerate(existing):
+        if r and r[0] == today:
+            target_row_idx = i + 1  # 1-based для Sheets API
+            break
 
-    ws.clear()
-    ws.update("A1", [FUNNEL_HEADERS] + all_data + [[]] + monthly_rows)
+    if target_row_idx:
+        # Рядок є — оновлюємо тільки його
+        ws.update(f"A{target_row_idx}", [new_row])
+    else:
+        # Знаходимо останній рядок з датою і вставляємо після нього
+        last_date_row = 1
+        for i, r in enumerate(existing):
+            if r and r[0] and re.match(r'\d{4}-\d{2}-\d{2}', r[0]):
+                last_date_row = i + 1
+        ws.update(f"A{last_date_row + 1}", [new_row])
 
 
 def _sync_funnel_sheets(spreadsheet, label: str, traffic_today: dict, subs: dict,
@@ -533,13 +556,22 @@ def _backfill_all_traffic(spreadsheet, sheet_title: str,
     if not new_rows:
         return
 
-    all_data = [r for r in existing[1:] if r and r[0] and re.match(r'\d{4}-\d{2}-\d{2}', r[0])]
-    all_data = sorted(all_data + new_rows, key=lambda r: r[0])
-    monthly_rows = _build_monthly_summary_rows(all_data)
+    last_date_sheet_row = 1
+    for i, r in enumerate(existing):
+        if r and r[0] and re.match(r'\d{4}-\d{2}-\d{2}', r[0]):
+            last_date_sheet_row = i + 1
 
-    ws.clear()
-    ws.update("A1", [FUNNEL_HEADERS] + all_data + [[]] + monthly_rows)
-    logger.info(f"Бекфіл {sheet_title}: {len(new_rows)} нових рядків")
+    existing_date_set = {r[0] for r in existing if r and r[0]}
+    appended = 0
+    for row in sorted(new_rows, key=lambda r: r[0]):
+        if row[0] in existing_date_set:
+            continue
+        last_date_sheet_row += 1
+        ws.update(f"A{last_date_sheet_row}", [row])
+        existing_date_set.add(row[0])
+        appended += 1
+
+    logger.info(f"Бекфіл {sheet_title}: {appended} нових рядків (існуючі збережено)")
 
 
 # ── Червень Traffic звіт filler ─────────────────────────────────────────────
