@@ -51,7 +51,14 @@ def _get_client():
     return gspread.authorize(creds)
 
 
-def _classify_campaign(name: str) -> str:
+def _classify_campaign(name: str, objective: str = "") -> str:
+    """Primary: Meta objective. Fallback: name keywords."""
+    obj = (objective or "").upper()
+    if obj == "OUTCOME_LEADS":
+        return "leadgen"
+    if obj == "OUTCOME_TRAFFIC":
+        return "traffic"
+    # Fallback for rows without objective in DB
     n = name.lower()
     if any(k in n for k in TRAFFIC_KEYWORDS):
         return "traffic"
@@ -109,6 +116,7 @@ def _aggregate_campaigns(rows: list) -> dict:
             stats[cid] = {
                 "campaign_id": cid,
                 "campaign_name": r["campaign_name"],
+                "campaign_objective": r.get("campaign_objective", ""),
                 "spend": 0, "impressions": 0, "clicks": 0,
                 "leads": 0, "link_clicks": 0, "reach": 0,
                 "video_views": 0, "page_likes": 0, "purchases": 0,
@@ -795,9 +803,9 @@ def _sync_sheet(gc, sheet_id: str, label: str, days: int = 30):
     today_stats = _aggregate_campaigns(rows_today)
 
     traffic_today = {k: v for k, v in today_stats.items()
-                     if _classify_campaign(v["campaign_name"]) in ("traffic", "other")}
+                     if _classify_campaign(v["campaign_name"], v.get("campaign_objective", "")) in ("traffic", "other")}
     leadgen_today = {k: v for k, v in today_stats.items()
-                     if _classify_campaign(v["campaign_name"]) == "leadgen"}
+                     if _classify_campaign(v["campaign_name"], v.get("campaign_objective", "")) == "leadgen"}
 
     # ── Fetch subscriber data ────────────────────────────────────────
     subs = {}

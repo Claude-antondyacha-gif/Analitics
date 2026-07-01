@@ -168,25 +168,23 @@ def get_metrics_by_date(date_iso: str) -> list[dict]:
 
 def get_metrics_by_period(days: int = 7, campaign_id: str = None,
                           objective: str = None) -> list[dict]:
+    """Returns daily_metrics joined with campaign objective for correct classification."""
     conn = get_connection()
+    # Always join campaigns to include objective in result
+    query = """
+        SELECT m.*, COALESCE(c.objective, '') as campaign_objective
+        FROM daily_metrics m
+        LEFT JOIN campaigns c ON m.campaign_id = c.id
+        WHERE m.date >= date('now', :offset)
+    """
+    params = {"offset": f"-{days} days"}
     if objective:
-        query = """
-            SELECT m.* FROM daily_metrics m
-            JOIN campaigns c ON m.campaign_id = c.id
-            WHERE m.date >= date('now', :offset)
-            AND c.objective = :objective
-        """
-        params = {"offset": f"-{days} days", "objective": objective}
-    else:
-        query = """
-            SELECT * FROM daily_metrics
-            WHERE date >= date('now', :offset)
-        """
-        params = {"offset": f"-{days} days"}
+        query += " AND c.objective = :objective"
+        params["objective"] = objective
     if campaign_id:
-        query += " AND campaign_id = :campaign_id"
+        query += " AND m.campaign_id = :campaign_id"
         params["campaign_id"] = campaign_id
-    query += " ORDER BY date DESC"
+    query += " ORDER BY m.date DESC"
     rows = conn.execute(query, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
