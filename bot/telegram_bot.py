@@ -455,6 +455,52 @@ def get_db_context_for_ai() -> str:
         return ""
 
 
+def build_creatives_report(days: int = 46) -> str:
+    """Зведка по креативах лідогенерації за останні N днів (агрегована)."""
+    try:
+        from storage.database import get_ad_metrics_summary
+        ads = get_ad_metrics_summary(days=days, only_leadgen=True)
+        if not ads:
+            return _NO_DATA_MSG
+
+        lines = [
+            f"🎨 <b>Креативи — Лідогенерація</b>",
+            f"📅 {date.today().strftime('%d.%m.%Y')} | Період: з {(date.today() - timedelta(days=days)).strftime('%d.%m')}",
+            "",
+        ]
+        total_spend = sum(a.get("total_spend") or 0 for a in ads)
+        total_leads = sum(a.get("total_leads") or 0 for a in ads)
+
+        for i, ad in enumerate(ads[:15], 1):
+            spend = ad.get("total_spend") or 0
+            leads = ad.get("total_leads") or 0
+            cpl = ad.get("cpl") or 0
+            days_active = ad.get("active_days") or 0
+            share = round(spend / total_spend * 100) if total_spend > 0 else 0
+            name = (ad.get("ad_name") or "—")[:35]
+            campaign = (ad.get("campaign_name") or "")[:25]
+
+            lines.append(f"<b>{i}. {name}</b>")
+            lines.append(f"   📁 {campaign}")
+            lines.append(
+                f"   💰 ${spend:.2f} ({share}% бюджету)  |  🎯 {leads} лідів  |  📉 CPL ${cpl:.2f}"
+            )
+            lines.append(f"   📆 {ad.get('first_date','')} → {ad.get('last_date','')}  ({days_active} дн.)")
+            lines.append("")
+
+        lines.append(f"━━━━━━━━━━━━━━")
+        overall_cpl = round(total_spend / total_leads, 2) if total_leads > 0 else 0
+        lines.append(f"РАЗОМ: 💰 ${total_spend:.2f}  |  🎯 {total_leads} лідів  |  CPL ${overall_cpl:.2f}")
+        if len(ads) > 15:
+            lines.append(f"<i>...показано 15 з {len(ads)} креативів (повний список у таблиці)</i>")
+
+        return "\n".join(lines)
+    except Exception as e:
+        if "no such table" in str(e):
+            return _NO_DATA_MSG
+        return f"❌ Помилка: {e}"
+
+
 # ── Command handlers ─────────────────────────────────────────────────────────
 
 HELP_TEXT = (
@@ -462,9 +508,11 @@ HELP_TEXT = (
     "<b>Команди:</b>\n"
     "/leads — лідогенерація по періодах\n"
     "/traffic — трафік по каналах (YouTube, Telegram, ChatBot)\n"
+    "/creatives — зведка по креативах (лідогенерація)\n"
     "/week — тижневий порівняльний звіт\n"
     "/report — повний щоденний звіт\n"
-    "/sync — запустити збір даних з Meta\n"
+    "/sync — запустити збір даних з Meta (вчора)\n"
+    "/backfill [дні] — підтягнути історію (напр. /backfill 45 = з 16 червня)\n"
     "/check — перевірити чи цифри в таблиці збігаються з Meta\n"
     "/status — статус останнього синку\n"
     "/stats — дані з Google Sheets\n"
@@ -524,6 +572,50 @@ def handle_update(update: dict):
             send_message(chat_id, report)
         except Exception as e:
             send_message(chat_id, f"❌ Помилка генерації звіту: {e}")
+        return
+
+    # /creatives
+    if text == "/creatives":
+        send_typing(chat_id)
+        send_message(chat_id, build_creatives_report())
+        return
+
+    # /backfill [days]
+    if text.startswith("/backfill"):
+        parts = text.split(maxsplit=1)
+        try:
+            days_back = int(parts[1]) if len(parts) > 1 else 45
+        except ValueError:
+            send_message(chat_id, "❌ Вкажи кількість днів числом. Приклад: /backfill 45")
+            return
+        send_message(chat_id,
+            f"⏳ Запускаю бекфіл за останні <b>{days_back} днів</b>...\n\n"
+            f"Це займе 3-10 хвилин. Дані підтягнуться в базу, "
+            f"потім автоматично заповниться лист <b>Креативи (авто)</b>."
+        )
+        def _run_backfill(d):
+            try:
+                from storage.database import init_db
+                init_db()
+                from collector.meta_collector import run_historical_backfill
+                count = run_historical_backfill(days=d)
+                # After backfill — sync creatives sheet
+                try:
+                    from reports.sheets_sync import sync_to_sheets
+                    sync_to_sheets(days=d)
+                except Exception as e_sheets:
+                    logger.warning(f"Sheets sync after backfill failed: {e_sheets}")
+                send_message(chat_id,
+                    f"✅ <b>Бекфіл завершено!</b>\n\n"
+                    f"Зібрано рядків: <b>{count}</b>\n"
+                    f"Лист <b>Креативи (авто)</b> оновлено.\n\n"
+                    f"Переглянь: /creatives"
+                )
+            except Exception as e:
+                logger.error(f"Backfill error: {e}", exc_info=True)
+                send_message(chat_id, f"❌ Помилка бекфілу: {e}")
+        import threading
+        threading.Thread(target=_run_backfill, args=(days_back,), daemon=True).start()
         return
 
     # /sync

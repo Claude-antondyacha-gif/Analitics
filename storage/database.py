@@ -267,8 +267,10 @@ def get_ad_metrics_by_period(days: int = 30, only_leadgen: bool = True) -> list[
     if only_leadgen:
         query += """
             AND (
-                c.objective = 'OUTCOME_LEADS'
+                c.objective IN ('OUTCOME_LEADS', 'OUTCOME_SALES', 'OUTCOME_CONVERSIONS', 'CONVERSIONS')
                 OR LOWER(a.campaign_name) LIKE '%snap%'
+                OR LOWER(a.campaign_name) LIKE '%lead%'
+                OR LOWER(a.campaign_name) LIKE '%конверс%'
             )
         """
 
@@ -312,8 +314,10 @@ def get_ad_metrics_summary(days: int = 30, only_leadgen: bool = True) -> list[di
     if only_leadgen:
         query += """
             AND (
-                c.objective = 'OUTCOME_LEADS'
+                c.objective IN ('OUTCOME_LEADS', 'OUTCOME_SALES', 'OUTCOME_CONVERSIONS', 'CONVERSIONS')
                 OR LOWER(a.campaign_name) LIKE '%snap%'
+                OR LOWER(a.campaign_name) LIKE '%lead%'
+                OR LOWER(a.campaign_name) LIKE '%конверс%'
             )
         """
 
