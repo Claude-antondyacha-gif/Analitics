@@ -60,25 +60,32 @@ def send_typing(chat_id: int):
 
 # ── GitHub helpers ───────────────────────────────────────────────────────────
 
+GITHUB_WORKFLOW_ID = os.environ.get("GITHUB_WORKFLOW_ID", "304657737")
+
+
 def trigger_github_sync() -> tuple[bool, str]:
     """Returns (success, error_message)."""
     if not GITHUB_TOKEN:
         return False, "Змінна GITHUB_PAT не встановлена в Railway"
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/daily_collect.yml/dispatches"
-    try:
-        resp = requests.post(url, headers={
-            "Authorization": f"token {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github.v3+json",
-        }, json={"ref": "main"}, timeout=15)
-        if resp.status_code == 204:
-            return True, ""
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    # Try by numeric ID first (more reliable), fallback to filename
+    for workflow_ref in [GITHUB_WORKFLOW_ID, "daily_collect.yml"]:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{workflow_ref}/dispatches"
         try:
-            detail = resp.json().get("message", resp.text[:200])
-        except Exception:
-            detail = resp.text[:200]
-        return False, f"GitHub API: {resp.status_code} — {detail}"
-    except Exception as e:
-        return False, str(e)
+            resp = requests.post(url, headers=headers, json={"ref": "main"}, timeout=15)
+            if resp.status_code == 204:
+                return True, ""
+            try:
+                detail = resp.json().get("message", resp.text[:200])
+            except Exception:
+                detail = resp.text[:200]
+            last_error = f"GitHub API: {resp.status_code} — {detail} (workflow: {workflow_ref})"
+        except Exception as e:
+            last_error = str(e)
+    return False, last_error
 
 
 def get_last_workflow_status() -> str:
